@@ -456,6 +456,28 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir).scopeModels).toBeUndefined();
     });
 
+    it("accepts confirmCallerModel boolean (true and false)", () => {
+      writeProject({ confirmCallerModel: true });
+      expect(loadSettings(projectDir)).toEqual({ confirmCallerModel: true });
+      writeProject({ confirmCallerModel: false });
+      expect(loadSettings(projectDir)).toEqual({ confirmCallerModel: false });
+    });
+
+    it("drops non-boolean confirmCallerModel", () => {
+      writeProject({ confirmCallerModel: "yes" });
+      expect(loadSettings(projectDir).confirmCallerModel).toBeUndefined();
+      writeProject({ confirmCallerModel: 1 });
+      expect(loadSettings(projectDir).confirmCallerModel).toBeUndefined();
+      writeProject({ confirmCallerModel: null });
+      expect(loadSettings(projectDir).confirmCallerModel).toBeUndefined();
+    });
+
+    it("project confirmCallerModel overrides the global value", () => {
+      writeGlobal({ confirmCallerModel: true });
+      writeProject({ confirmCallerModel: false });
+      expect(loadSettings(projectDir).confirmCallerModel).toBe(false);
+    });
+
     it("accepts disableDefaultAgents boolean (true and false)", () => {
       writeProject({ disableDefaultAgents: true });
       expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: true });

@@ -88,6 +88,13 @@ export interface SubagentsSettings {
    * against. Defaults to false: subagents may use any model.
    */
   scopeModels?: boolean;
+  /** Ask the human partner before a subagent spawns with a caller-named
+   *  model. Defaults to true in this fork; off restores the old silent
+   *  behaviour.
+   *
+   *  Fails closed: no UI, no registered context, or a throwing confirm route
+   *  refuses the spawn. See src/model-confirmation.ts. */
+  confirmCallerModel?: boolean;
   /**
    * When true, an unreadable or unparseable agent `.md` aborts extension load
    * instead of being skipped with a warning — pi exits, naming the file.
@@ -352,6 +359,7 @@ export interface SettingsAppliers {
   setBackgroundByDefault: (b: boolean) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
+  setConfirmCallerModel: (enabled: boolean) => void;
   setStrictAgentFiles: (b: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
@@ -461,6 +469,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
+  }
+  if (typeof r.confirmCallerModel === "boolean") {
+    out.confirmCallerModel = r.confirmCallerModel;
   }
   if (typeof r.strictAgentFiles === "boolean") {
     out.strictAgentFiles = r.strictAgentFiles;
@@ -584,6 +595,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.backgroundByDefault === "boolean") appliers.setBackgroundByDefault(s.backgroundByDefault);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
+  if (typeof s.confirmCallerModel === "boolean") appliers.setConfirmCallerModel(s.confirmCallerModel);
   if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);

@@ -31,6 +31,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
+import { isConfirmCallerModelEnabled, setConfirmCallerModel } from "./model-confirmation.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -1573,6 +1574,7 @@ export default function (pi: ExtensionAPI) {
       setBackgroundByDefault,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
+      setConfirmCallerModel,
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
@@ -3764,6 +3766,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       backgroundByDefault: getBackgroundByDefault(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
+      confirmCallerModel: isConfirmCallerModelEnabled(),
       strictAgentFiles,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
@@ -3944,6 +3947,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           label: "Scope models",
           description: "Validate subagent models against scoped models (/scoped-models)",
           currentValue: isScopeModelsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "confirmCallerModel",
+          label: "Confirm caller model",
+          description: "Ask before a subagent spawns with a model the calling agent named",
+          currentValue: isConfirmCallerModelEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -4136,6 +4146,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "confirmCallerModel") {
+        const enabled = value === "on";
+        setConfirmCallerModel(enabled);
+        notifyApplied(ctx, `Confirm caller model ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "strictAgentFiles") {
         const enabled = value === "on";
         strictAgentFiles = enabled;
