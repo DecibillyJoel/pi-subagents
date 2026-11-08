@@ -31,7 +31,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
-import { isConfirmCallerModelEnabled, setConfirmCallerModel } from "./model-confirmation.js";
+import { confirmCallerSuppliedModel, isConfirmCallerModelEnabled, setConfirmationCtx, setConfirmCallerModel } from "./model-confirmation.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -836,6 +836,10 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
+    // The confirmation gate asks through this context. It is per-session, so it
+    // is registered and cleared with `currentCtx` rather than captured in a
+    // closure the nested tools could never reach.
+    setConfirmationCtx(ctx);
     // Pi resolves project trust before the first session starts, so this is the
     // earliest honest answer. The activation-time load defaulted to untrusted,
     // so a trusted project's `packages[]` only becomes visible now.
@@ -1149,6 +1153,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubSteer();
     rpcHandle = undefined;
     currentCtx = undefined;
+    setConfirmationCtx(undefined);
     // Only release the global slot if this activation claimed it — a child
     // session's shutdown must not delete the root session's registry entry.
     if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
@@ -1777,7 +1782,7 @@ Terse command-style prompts produce shallow, generic work.
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Naming a model asks your human partner to confirm it before the subagent starts, and a refusal fails the call. Omit `model` to inherit your own model; that needs no confirmation.',
         }),
       ),
       thinking: Type.Optional(
@@ -2041,6 +2046,21 @@ Terse command-style prompts produce shallow, generic work.
       });
       if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
       if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
+
+      // A model the caller named is a deliberate act, and the person paying for
+      // it never sees it. Ask first. `model` is non-null whenever
+      // `modelFromParams` is true (see resolveAgentInvocationConfig), so the
+      // trailing guard is for the type checker only. A resume replays a stored
+      // session and names no model, so it is not gated.
+      if (resolvedConfig.modelFromParams && params.resume === undefined && model) {
+        const verdict = await confirmCallerSuppliedModel({
+          model: describeModel(model),
+          modelInput: resolvedConfig.modelInput ?? "",
+          agentLabel: customConfig?.displayName ?? subagentType,
+          source: "agent-tool",
+        });
+        if (!verdict.allowed) return textResult(verdict.reason);
+      }
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;

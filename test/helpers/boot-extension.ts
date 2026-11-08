@@ -85,7 +85,21 @@ export function ctx(overrides: Record<string, unknown> = {}) {
     // mention test exercise the headless fall-through instead.
     mode: "tui",
     hasUI: false,
-    ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn() },
+    // `confirm` is here because the real extension hands its `session_start`
+    // ctx to `setConfirmationCtx`, and every caller-named model is refused
+    // without it. A fake that lacks it would turn every such spawn in every
+    // suite into a refusal.
+    ui: {
+      setStatus: vi.fn(),
+      setWidget: vi.fn(),
+      notify: vi.fn(),
+      addAutocompleteProvider: vi.fn(),
+      confirm: vi.fn(async () => true),
+      // `session_start` hands `ctx.ui` to the fleet widget and the handoff-key
+      // watcher, both of which call this. A `hasUI: true` fake that lacks it
+      // throws before any tool runs.
+      onTerminalInput: vi.fn(() => vi.fn()),
+    },
     cwd: process.cwd(),
     model: undefined,
     modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
