@@ -1,7 +1,7 @@
 # Subagent model confirmation gate — design
 
 Date: 2026-11-08
-Status: awaiting approval
+Status: approved 2026-11-08
 
 ## Intent
 

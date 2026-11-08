@@ -725,6 +725,33 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 **No-op safety:** if `enabledModels` is missing or empty in pi's settings, scope check skips entirely — no false positives, no spurious errors.
 
+## Model Confirmation
+
+**On by default.** Turn it off with `confirmCallerModel: false` in `subagents.json`, or from `/agents → Settings → Confirm caller model`.
+
+When on, a spawn whose `model` the calling agent named is held until you confirm it. The prompt names the subagent, the resolved model, and the path the name came from. An omitted `model` inherits your session's own model, so it costs what your own turns cost and is never confirmed. Naming one is a deliberate act that the person paying for it otherwise never sees.
+
+**Every path that can name a model is gated:**
+
+| Path | Refusal shape |
+|---|---|
+| `Agent({ model: "..." })` | Tool error carrying the reason. Nothing spawns |
+| Nested delegation tools ([nested subagents](#nested-subagents)) | `isError` tool result carrying the reason. Nothing spawns |
+| A workflow's `agent(prompt, { model })` | `{ ok: false, error }` to the script, and `null` for that one agent |
+| Cross-extension RPC (`subagents:rpc:spawn`, e.g. pi-tasks `TaskExecute`) | A `throw` the caller sees as `{ success: false, error }` |
+
+**Not gated:**
+
+- A `model:` in an agent file's frontmatter. The agent file already declares it, and you can read it there.
+- A parent-inherited model, because the caller named nothing.
+- A caller-named model on a `resume`. A reopen starts no new agent.
+
+**No UI, no spawn.** Print mode (`-p`), JSON mode (`--mode json`), and a scheduled run whose session has no UI have no prompt to show. Those spawns are refused rather than silently allowed, and the refusal names the fix — drop `model`, or run interactively. Every other failure on the confirmation route denies too: a throw is a refusal, not an allow.
+
+The gate runs after the [model scope](#model-scope) check, so an out-of-scope caller-named model keeps its hard error and raises no prompt.
+
+**Design:** a `scopeModels`-style policy in one module, consulted by all four sites in the order resolve → scope-validate → confirm → spawn. The calling agent's own name for the model, not the frontmatter's, is the decision signal — so an agent file that pins a model is never held up by this.
+
 ## Persistent Settings
 
 Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, confirm caller models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
@@ -1101,6 +1128,7 @@ src/
   model-resolver.ts   # Model resolution: exact provider/modelId with fuzzy fallback
   enabled-models.ts   # Read pi's enabledModels settings (project over global)
   model-scope.ts      # scopeModels allowlist policy, shared by top-level and nested tools
+  model-confirmation.ts # confirmCallerModel policy: hold a caller-named model for the partner
   mention.ts          # `@handle message` grammar: suggestion triggers and send parsing
   mention-clone.ts    # Run a mention's turn in a cloned conversation, off the main chat
   cross-extension-rpc.ts # ping/spawn/stop/consume/steer RPC handlers over pi.events

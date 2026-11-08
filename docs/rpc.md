@@ -16,7 +16,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 |---|---|---|
 | `description` | string | What the agent is doing. Shown in the widget, FleetView and the completion notification |
 | `name` | string | A memorable second handle (`@auth-audit`). Slugged, never validated — anything unusable degrades rather than failing the spawn |
-| `model` | `Model` **or** `"provider/modelId"` | Strings are resolved at the RPC boundary against `ctx.modelRegistry`. `null` means inherit, not override. Resolution is fuzzy — see [Model Scope](../README.md#model-scope) |
+| `model` | `Model` **or** `"provider/modelId"` | Strings are resolved at the RPC boundary against `ctx.modelRegistry`. `null` means inherit, not override. Resolution is fuzzy — see [Model Scope](../README.md#model-scope). Naming a model asks the human partner to confirm it before the spawn, and a refusal arrives as `{ success: false, error }` — see [Model Confirmation](../README.md#model-confirmation) |
 | `maxTurns` | number | Turn ceiling for the run |
 | `isolated` | boolean | Strips extensions, skills and nested tools. Applies only when the agent file leaves `isolated:` unset — frontmatter is authoritative. **Not** a git worktree — see the trap table below |
 | `inheritContext` | boolean | Fork the parent conversation into the child. Only this option decides — an agent file's `inherit_context:` does not apply to RPC spawns |
@@ -77,6 +77,7 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | `Model override "<label>" provided but ctx.modelRegistry is unavailable` | spawn handler, `src/cross-extension-rpc.ts` |
 | `Model not found: "<input>".` + available models | `resolveModel`, `src/model-resolver.ts` |
 | `Model not in scope: "<input>".` + allowed models | `checkModelScope`, `src/model-scope.ts` — only with `scopeModels` on, and checked against the *resolved* model |
+| `<reason> Subagent "<label>" was not started. The human partner denied the model "<id>".` … | `confirmCallerSuppliedModel`, `src/model-confirmation.ts` — only with `confirmCallerModel` on (the default), and checked against the *resolved* model. The same helper returns `Subagent "<label>" was not started. It named the model "<id>", and no UI is available to confirm it.` when the session has no UI — print mode, JSON mode, or a scheduled run. Both are denials, and both carry the same trailer naming the fix |
 | `Unknown or disabled agent type: "<raw>". Available: <list>.` | `resolveSpawnTypeIn`, `src/agent-types.ts` — only under `fallbackSubagent: none` |
 | `No agent type given. Available: <list>.` | `resolveSpawnTypeIn` — same condition |
 | `<reason> The configured fallbackSubagent "<x>" is itself unknown or disabled. Available: <list>.` | `resolveSpawnTypeIn` |
