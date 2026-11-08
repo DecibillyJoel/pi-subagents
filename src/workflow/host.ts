@@ -37,7 +37,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AgentManager } from "../agent-manager.js";
 import { reopenTarget, worktreeLost } from "../agent-record-entry.js";
 import { getAgentConfig, resolveSpawnType } from "../agent-types.js";
-import { resolveModel } from "../model-resolver.js";
+import { confirmCallerSuppliedModel } from "../model-confirmation.js";
+import { describeModel, resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
 import type { AgentRecord, ThinkingLevel } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
@@ -295,6 +296,23 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       if (scopeVerdict.kind === "warn" && !warnedScopeMessages.has(scopeVerdict.message)) {
         warnedScopeMessages.add(scopeVerdict.message);
         ctx.ui.notify(scopeVerdict.message, "warning");
+      }
+
+      // The script named a model: ask the human partner through the context the
+      // session registered. The order is the same as every other spawn site —
+      // resolve, scope-validate, confirm, spawn — so an out-of-scope model above
+      // fails hard and never reaches a prompt. Only `request.model` is gated:
+      // `modelInput` has already absorbed the agent file's own `model:`, which
+      // is user-authored config and asks nothing. `model` is non-null whenever
+      // `request.model` is set, so the trailing guard is for the type checker.
+      if (request.model !== undefined && model) {
+        const verdict = await confirmCallerSuppliedModel({
+          model: describeModel(model),
+          modelInput: request.model,
+          agentLabel: config?.displayName ?? dispatch.type,
+          source: "workflow",
+        });
+        if (!verdict.allowed) return { ok: false, error: verdict.reason };
       }
 
       /**

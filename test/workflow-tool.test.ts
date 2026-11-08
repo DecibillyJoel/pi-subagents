@@ -23,6 +23,7 @@ import type { AgentManager } from "../src/agent-manager.js";
 import { SUBAGENT_TOOL_NAMES } from "../src/agent-runner.js";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import subagentsExtension, { WORKFLOW_ENTRY_TYPE, WORKFLOW_FILE_FLAG } from "../src/index.js";
+import { setConfirmationCtx } from "../src/model-confirmation.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 import type { AgentRecord } from "../src/types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
@@ -88,6 +89,24 @@ const execResult = (overrides: Partial<{ stdout: string; stderr: string; code: n
   code: 0,
   killed: false,
   ...overrides,
+});
+
+/**
+ * The confirmation gate reads its context from `src/model-confirmation.ts`,
+ * not from the session ctx a test builds. Register a confirming one for the
+ * whole file: several cases below spawn with a caller-named model, and a fake
+ * that answered `false` — or that was missing — would turn each of them into a
+ * refusal.
+ */
+let confirm: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  confirm = vi.fn(async () => true);
+  setConfirmationCtx({ hasUI: true, ui: { confirm } });
+});
+
+afterEach(() => {
+  setConfirmationCtx(undefined);
 });
 
 /* ------------------------------------------------------------------------- *
@@ -457,6 +476,85 @@ describe("createWorkflowHost — scopeModels", () => {
     expect(stub.spawnAndWait).toHaveBeenCalledTimes(2);
     expect(stub.spawnAndWait.mock.calls[0][4].model).toBe(BLOCKED);
     expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+describe("createWorkflowHost — caller-named model confirmation", () => {
+  const NAMED = { id: "named-model", name: "Named", provider: "anthropic" };
+  const modelRegistry = {
+    find: (provider: string, id: string) => (provider === NAMED.provider && id === NAMED.id ? NAMED : null),
+    getAll: () => [NAMED],
+    getAvailable: () => [NAMED],
+  };
+  const namedCtx = () => ctx({ modelRegistry });
+
+  beforeEach(() => {
+    // "pinned" stands in for a user-authored agent file with `model:` in its
+    // frontmatter; the defaults come along, so "general-purpose" still resolves.
+    registerAgents(new Map([["pinned", {
+      name: "pinned",
+      displayName: "Pinned",
+      description: "an agent whose file pins a model",
+      extensions: false,
+      skills: false,
+      model: "anthropic/named-model",
+      systemPrompt: "pinned",
+      promptMode: "replace",
+    } as any]]));
+  });
+
+  afterEach(() => {
+    registerAgents(new Map());
+  });
+
+  it("refuses the spawn when the partner denies the model, and fails only that agent", async () => {
+    confirm.mockResolvedValueOnce(false);
+    const stub = stubManager();
+    const host = createWorkflowHost({ pi: {} as any, ctx: namedCtx(), manager: stub.manager });
+
+    const result = await host.spawnAgent(request({ model: "anthropic/named-model" }));
+
+    // `{ok: false}` rather than a throw, the same shape the scope refusal takes:
+    // the runtime turns this into `null` for the script, so one refused model
+    // does not take the run's siblings down.
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('The human partner denied the model "anthropic/named-model"');
+    expect(stub.spawnAndWait).not.toHaveBeenCalled();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0][0]).toBe("Allow this model?");
+  });
+
+  it("spawns once the partner confirms", async () => {
+    const stub = stubManager();
+    const host = createWorkflowHost({ pi: {} as any, ctx: namedCtx(), manager: stub.manager });
+
+    const result = await host.spawnAgent(request({ model: "anthropic/named-model" }));
+
+    expect(result.ok).toBe(true);
+    expect(stub.spawnAndWait).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ask when the agent file pinned the model", async () => {
+    const stub = stubManager();
+    const host = createWorkflowHost({ pi: {} as any, ctx: namedCtx(), manager: stub.manager });
+
+    const result = await host.spawnAgent(request({ agentType: "pinned" }));
+
+    expect(result.ok).toBe(true);
+    expect(stub.spawnAndWait).toHaveBeenCalledTimes(1);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("asks once per caller-named model, not once per spawn", async () => {
+    const stub = stubManager();
+    const host = createWorkflowHost({ pi: {} as any, ctx: namedCtx(), manager: stub.manager });
+
+    await host.spawnAgent(request({ model: "anthropic/named-model" }));
+    await host.spawnAgent(request({ agentId: "wf-agent-1", index: 1, model: "anthropic/named-model" }));
+
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(stub.spawnAndWait).toHaveBeenCalledTimes(2);
   });
 });
 

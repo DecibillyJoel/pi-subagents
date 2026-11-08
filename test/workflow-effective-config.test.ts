@@ -13,7 +13,7 @@
  * feeds it: the host reading the record's snapshot and handing it over.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
@@ -30,6 +30,7 @@ vi.mock("../src/worktree.js", () => ({
 import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
+import { setConfirmationCtx } from "../src/model-confirmation.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
 import type { WorkflowSpawnRequest } from "../src/workflow/runtime.js";
 import { ctx } from "./helpers/boot-extension.js";
@@ -85,6 +86,14 @@ describe("the workflow host reports a child's effective configuration", () => {
     vi.mocked(runAgent).mockReset();
     registerAgents(new Map());
     manager = new AgentManager();
+    // Two cases below name a model from the script, which the confirmation gate
+    // asks the human partner about. The gate reads its context from
+    // `src/model-confirmation.ts`, not from the ctx built here.
+    setConfirmationCtx({ hasUI: true, ui: { confirm: vi.fn(async () => true) } });
+  });
+
+  afterEach(() => {
+    setConfirmationCtx(undefined);
   });
 
   it("hands over the model the session actually resolved to, not the script's spelling", async () => {
