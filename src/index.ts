@@ -794,7 +794,9 @@ export default function (pi: ExtensionAPI) {
    * confirmed. `spawnTopLevel` stays the ungated funnel it was.
    *
    * `async` on every return path, including one that names nothing, so a single
-   * caller shape covers both and a refusal can arrive as a rejection.
+   * caller shape covers both and a refusal can arrive as a rejection. A
+   * rejection from here is a refusal, not a crash: `registryEntry` is untyped
+   * `globalThis` access, so no type contract forces a caller to await.
    *
    * An unresolvable name is passed through unasked, exactly as before the gate
    * existed: this path never validated models, and the review scoped the finding

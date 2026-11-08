@@ -747,13 +747,13 @@ When on, a spawn whose `model` the calling agent named is held until you confirm
 - A parent-inherited model, because the caller named nothing.
 - A caller-named model on a `resume`. A reopen starts no new agent.
 - A scheduled run's own re-spawn when it fires. Naming the model was gated when you created the schedule.
-- A registry `spawn` naming a model the registry cannot resolve. That path never validated models, and it still passes an unresolvable name through unchanged.
+- A registry `spawn` naming a model the registry cannot resolve, or one outside the allowed scope. That path never validated models, and it still passes an unresolvable name through unchanged.
 
-**No UI, no spawn.** Print mode (`-p`), JSON mode (`--mode json`), and a scheduled run whose session has no UI have no prompt to show. Those spawns are refused rather than silently allowed, and the refusal names the fix — drop `model`, or run interactively. Every other failure on the confirmation route denies too: a throw is a refusal, not an allow.
+**No UI, no spawn.** Print mode (`-p`) and JSON mode (`--mode json`) have no prompt to show. Those spawns are refused rather than silently allowed, and the refusal names the fix — drop `model`, or run interactively. Every other failure on the confirmation route denies too: a throw is a refusal, not an allow.
 
-The gate runs after the [model scope](#model-scope) check, so an out-of-scope caller-named model keeps its hard error and raises no prompt.
+The gate runs after the [model scope](#model-scope) check on the four caller paths, so an out-of-scope caller-named model keeps its hard error and raises no prompt. A registry `spawn` does not run that check.
 
-**Design:** a `scopeModels`-style policy in one module, consulted by all five sites in the order resolve → scope-validate → confirm → spawn. The calling agent's own name for the model, not the frontmatter's, is the decision signal — so an agent file that pins a model is never held up by this.
+**Design:** a `scopeModels`-style policy in one module, consulted by all five sites in the order resolve → (scope-validate, on the four caller paths) → confirm → spawn. The calling agent's own name for the model, not the frontmatter's, is the decision signal — so an agent file that pins a model is never held up by this.
 
 ## Persistent Settings
 
