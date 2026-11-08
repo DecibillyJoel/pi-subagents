@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable } from "../src/cross-extension-rpc.js";
+import { setConfirmationCtx } from "../src/model-confirmation.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 
 /** Simple in-process event bus for testing. */
@@ -38,6 +39,14 @@ describe("cross-extension RPC", () => {
     };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
+    // These suites cover resolution and scope, not confirmation, so a spawned
+    // caller-named model must be able to pass the gate. The suites that test the
+    // gate itself register their own spy and assert on it.
+    setConfirmationCtx({ hasUI: true, ui: { confirm: vi.fn(async () => true) } });
+  });
+
+  afterEach(() => {
+    setConfirmationCtx(undefined); // module-global — restore for other suites
   });
 
   // --- ping ---
@@ -636,6 +645,117 @@ describe("cross-extension RPC", () => {
       expect(manager.spawn).toHaveBeenCalledWith(
         deps.pi, ctx, "general-purpose", "x", { model: BLOCKED },
       );
+    });
+  });
+
+  // --- confirmCallerModel on the RPC spawn path: an override on the RPC payload
+  //     is the caller naming a model, so the human partner confirms it before the
+  //     spawn — the same gate the Agent tool applies. pi-tasks TaskExecute reaches
+  //     subagents through this handler and carries its own model parameter, so
+  //     leaving it open would be a hole in the gate. ---
+
+  describe("spawn RPC model confirmation", () => {
+    const NAMED = { id: "gpt-5.5", provider: "openai-codex", name: "GPT 5.5" };
+    const BLOCKED = { id: "claude-sonnet-4", provider: "anthropic", name: "Claude Sonnet 4" };
+    const MODELS = [NAMED, BLOCKED];
+    const registry = {
+      find: (provider: string, id: string) =>
+        MODELS.find(m => m.provider === provider && m.id === id) ?? null,
+      getAll: () => MODELS,
+      getAvailable: () => MODELS,
+    };
+
+    let confirm: ReturnType<typeof vi.fn>;
+    let projectDir: string;
+    let agentDir: string;
+    let prevAgentDir: string | undefined;
+    let prevEnabled: boolean;
+
+    beforeEach(() => {
+      confirm = vi.fn(async () => true);
+      setConfirmationCtx({ hasUI: true, ui: { confirm } });
+      projectDir = mkdtempSync(join(tmpdir(), "pi-rpc-confirm-project-"));
+      agentDir = mkdtempSync(join(tmpdir(), "pi-rpc-confirm-global-"));
+      prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      prevEnabled = isScopeModelsEnabled();
+      setScopeModelsEnabled(false);
+      ctx = { session: true, cwd: projectDir, modelRegistry: registry };
+      deps = { events, pi: { events }, getCtx: () => ctx, manager };
+    });
+
+    afterEach(() => {
+      setConfirmationCtx(undefined);
+      setScopeModelsEnabled(prevEnabled); // module-global — restore for other suites
+      if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+      rmSync(projectDir, { recursive: true, force: true });
+      rmSync(agentDir, { recursive: true, force: true });
+    });
+
+    async function spawn(requestId: string, options: Record<string, unknown>) {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on(`subagents:rpc:spawn:reply:${requestId}`, reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId, type: "general-purpose", prompt: "x", options,
+      });
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      return (reply as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    }
+
+    it("refuses the spawn when the partner denies the model", async () => {
+      confirm.mockResolvedValueOnce(false);
+      const call = await spawn("req-cf1", { model: "openai-codex/gpt-5.5" });
+      expect(call.success).toBe(false);
+      expect(call.error).toContain('The human partner denied the model "openai-codex/gpt-5.5"');
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("spawns once the partner confirms", async () => {
+      const call = await spawn("req-cf2", { model: "openai-codex/gpt-5.5" });
+      expect(call).toEqual({ success: true, data: { id: "agent-42" } });
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(manager.spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not ask when the caller named no model", async () => {
+      const call = await spawn("req-cf3", {});
+      expect(call).toEqual({ success: true, data: { id: "agent-42" } });
+      expect(confirm).not.toHaveBeenCalled();
+    });
+
+    it("does not ask for an explicit null model, which means inherit", async () => {
+      const call = await spawn("req-cf4", { model: null });
+      expect(call).toEqual({ success: true, data: { id: "agent-42" } });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "general-purpose", "x", { model: null },
+      );
+    });
+
+    it("refuses without a UI instead of spawning silently", async () => {
+      setConfirmationCtx(undefined);
+      const call = await spawn("req-cf5", { model: "openai-codex/gpt-5.5" });
+      expect(call.success).toBe(false);
+      expect(call.error).toContain("no UI is available to confirm it");
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("keeps the scope error and asks nothing for an out-of-scope model", async () => {
+      // The gate sits after the scope check, so a spawn that is already refused
+      // never reaches the human partner with a prompt.
+      setScopeModelsEnabled(true);
+      mkdirSync(join(projectDir, ".pi"), { recursive: true });
+      writeFileSync(
+        join(projectDir, ".pi", "settings.json"),
+        JSON.stringify({ enabledModels: ["openai-codex/gpt-5.5"] }),
+      );
+      const call = await spawn("req-cf6", { model: BLOCKED });
+      expect(call.success).toBe(false);
+      expect(call.error).toMatch(/Model not in scope/);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(manager.spawn).not.toHaveBeenCalled();
     });
   });
 });

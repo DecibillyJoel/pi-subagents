@@ -14,7 +14,8 @@
  */
 
 import { isTopLevelAgent } from "./agent-manager.js";
-import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { confirmCallerSuppliedModel } from "./model-confirmation.js";
+import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import type { AgentRecord } from "./types.js";
 
@@ -159,6 +160,19 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
           modelInput: label,
         });
         if (verdict.kind === "error") throw new Error(verdict.message);
+
+        // Same order as every other site: resolve, scope-validate, confirm,
+        // spawn. A payload model is a name the calling extension chose, so the
+        // human partner confirms it before anything starts. The scope check
+        // above has already thrown for an out-of-scope model, so a refused
+        // spawn never reaches this prompt.
+        const confirmation = await confirmCallerSuppliedModel({
+          model: describeModel(model),
+          modelInput: label,
+          agentLabel: type,
+          source: "rpc",
+        });
+        if (!confirmation.allowed) throw new Error(confirmation.reason);
       }
 
       const id = manager.spawn(pi, ctx, type, prompt, normalizedOptions);
