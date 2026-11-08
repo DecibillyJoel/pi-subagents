@@ -20,11 +20,12 @@ caller why, so the caller can correct itself.
 ## Goals
 
 - Prompt the human partner before a subagent spawns with a caller-named model.
-- Cover all four declaring paths:
+- Cover all five declaring paths:
   1. the `Agent` tool,
   2. the nested delegation tools,
   3. `agent({ model })` inside a workflow script,
-  4. the inbound `subagents:rpc:spawn` handler.
+  4. the inbound `subagents:rpc:spawn` handler,
+  5. the manager registry's `spawn`, added by review after approval.
 - Block the spawn when no UI can answer, and say why in the tool result.
 - Fail closed. Any error on the confirmation route is a denial.
 - Ship a failing test first for each path.
@@ -83,7 +84,8 @@ keep. No fork, and it survives pi updates. It covers the `Agent` tool and
 the nested tools, because nested calls through `ctx.executeTool()` also
 fire `tool_call` handlers. It **cannot** cover the workflow path, because
 `agent({ model })` inside a script is not a tool call — it is an in-process
-`callHost("agent", …)`. The partner asked for all four paths.
+`callHost("agent", …)`. The partner asked for all four, and a later review
+found a fifth.
 
 **C. Patch the installed npm package in place.** Fast to try, and the next
 `pi update` erases it. Rejected.
@@ -91,9 +93,9 @@ fire `tool_call` handlers. It **cannot** cover the workflow path, because
 ### Mechanism inside A
 
 The coverage decision forces one mechanism: a shared helper called at the
-four spawn sites. A `tool_call` hook would cover two paths and leave the
+five spawn sites. A `tool_call` hook would cover two paths and leave the
 rest to a different mechanism, which duplicates policy and doubles the
-places a future change can miss. One helper, four call sites.
+places a future change can miss. One helper, five call sites.
 
 ## The How (decided)
 
@@ -207,7 +209,7 @@ Default in this fork: **`true`**. This matches the partner's standing rule,
 the designer's call, because the partner did not state a default. Upstream
 would almost certainly want `false`; this fork is the partner's own use.
 
-### 3. Call sites (four paths)
+### 3. Call sites (five paths)
 
 **Path 1 — the `Agent` tool, `src/index.ts`.** The block runs a little
 after `const resolvedConfig = resolveAgentInvocationConfig(customConfig,
@@ -293,12 +295,43 @@ own comment already treats a payload model as "an orchestrator-level
 choice, exactly like `Agent({ model })`". Leaving it open would leave a
 hole in the gate.
 
+**Path 5 — the manager registry's `spawn`, `src/index.ts`.** Added by the
+review of the finished branch, which found `registryEntry.spawn` pointing
+straight at `spawnTopLevel`. That funnel strips internal options but keeps
+`model`, so a registry caller could name a model with no prompt. The gate
+lives in a new `registrySpawn` wrapper and **not** in `spawnTopLevel`,
+because the RPC handler passes `spawnTopLevel` as its own manager — a gate
+there would ask a second time about a model Path 4 already confirmed.
+
+```ts
+if (override != null) {
+  const model = typeof override === "string" ? resolveModel(override, ctxRef?.modelRegistry) : override;
+  if (model !== undefined && typeof model !== "string") {
+    const verdict = await confirmCallerSuppliedModel({
+      model: describeModel(model),
+      modelInput: typeof override === "string" ? override : `${override.provider}/${override.id}`,
+      agentLabel: type,
+      source: "registry",
+    });
+    if (!verdict.allowed) throw new Error(verdict.reason);
+  }
+}
+return spawnTopLevel(piRef, ctxRef, type, prompt, options);
+```
+
+Two consequences the partner accepted. The registry `spawn` is now `async`
+and returns `Promise<string>` on every path, so a refusal arrives as a
+rejection. And this path runs no `checkModelScope`, as it never did, so a
+registry caller can still name an out-of-scope model: that residual gap is
+recorded in the ledger and named in the README.
+
 ### 4. Ordering rule, stated once
 
-At every site the order is: resolve → scope-validate → confirm → spawn.
-All four sites call the one helper, in that order. Resolve and scope both
-reject with no prompt. A prompt therefore only ever asks about a model
-that would really run.
+At every caller site the order is: resolve → scope-validate → confirm →
+spawn. All five sites call the one helper, in that order. Resolve and scope
+both reject with no prompt. A prompt therefore only ever asks about a model
+that would really run. The registry path is the one exception to the order:
+it resolves and confirms, and never scope-validates.
 
 ### 5. Risks
 
@@ -319,7 +352,7 @@ that would really run.
 ## What the human partner decided
 
 - Approach A: fork the repository and gate inside the extension.
-- Coverage: all four paths, including workflow scripts and the RPC handler.
+- Coverage: all five paths, including workflow scripts, the RPC handler, and the manager registry.
 - No UI: block the spawn.
 - Frontmatter `model:` in an agent file: not gated. Caller-named models only.
 
@@ -344,11 +377,14 @@ The partner should check these while reading. Each is reversible.
    leave a hole.
 9. A resume that carries a stray `model` is not gated. A resume makes no
    new model choice.
+10. The manager registry's `spawn` is gated, in a wrapper, and returns a
+    promise on every path. Its refusal is a rejection. This path still
+    runs no model-scope check.
 
 ## What is left to the builder
 
 - Create the fork `DecibillyJoel/pi-subagents`, keep this doc and commit it.
-- Write the failing test first for each of the four paths, then the helper.
+- Write the failing test first for each of the five paths, then the helper.
   `test/invocation-config.test.ts` shows the config-level shape.
   `test/schedule-menu.test.ts` shows a `ctx.ui.confirm` fake.
   `test/documented-defaults.test.ts` shows how a default is asserted.
