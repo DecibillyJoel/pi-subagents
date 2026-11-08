@@ -101,7 +101,7 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | `Model override "<label>" provided but ctx.modelRegistry is unavailable` | spawn handler, `src/cross-extension-rpc.ts` |
 | `Model not found: "<input>".` + available models | `resolveModel`, `src/model-resolver.ts` |
 | `Model not in scope: "<input>".` + allowed models | `checkModelScope`, `src/model-scope.ts` — only with `scopeModels` on, and checked against the *resolved* model |
-| `<reason> Subagent "<label>" was not started. The human partner denied the model "<id>".` … | `confirmCallerSuppliedModel`, `src/model-confirmation.ts` — only with `confirmCallerModel` on (the default), and checked against the *resolved* model. The same helper returns `Subagent "<label>" was not started. It named the model "<id>", and no UI is available to confirm it.` when the session has no UI — print mode, JSON mode, or a scheduled run. Both are denials, and both carry the same trailer naming the fix |
+| `<reason> Subagent "<label>" was not started. The human partner denied the model "<id>".` … | `confirmCallerSuppliedModel`, `src/model-confirmation.ts` — only with `confirmCallerModel` on (the default), and checked against the *resolved* model. The same helper returns `Subagent "<label>" was not started. It named the model "<id>", and no UI is available to confirm it.` when the session has no UI — print mode or JSON mode. Both are denials, and both carry the same trailer naming the fix |
 | `Unknown or disabled agent type: "<raw>". Available: <list>.` | `resolveSpawnTypeIn`, `src/agent-types.ts` — only under `fallbackSubagent: none` |
 | `No agent type given. Available: <list>.` | `resolveSpawnTypeIn` — same condition |
 | `<reason> The configured fallbackSubagent "<x>" is itself unknown or disabled. Available: <list>.` | `resolveSpawnTypeIn` |
@@ -338,7 +338,7 @@ pi.events.emit("subagents:rpc:workflow_list", { requestId });
 |---|---|---|
 | `waitForAll()` | `() => Promise<void>` | Resolves when nothing is running. **All** agents, including ones you did not spawn — a shutdown barrier, not a join |
 | `hasRunning()` | `() => boolean` | |
-| `spawn(pi, ctx, type, prompt, options)` | `=> string` | **Is** `spawnTopLevel`, so the strip list above applies identically |
+| `spawn(pi, ctx, type, prompt, options)` | `=> Promise<string>` | Confirms a caller-named `options.model` first, then **is** `spawnTopLevel`, so the strip list above applies identically. A refusal is a rejected promise carrying the reason |
 | `getRecord(id)` | `=> AgentRecord \| undefined` | Filtered through `isTopLevelAgent`: someone else's child comes back `undefined`. The record is live and mutable (abort controller, session), so handing out an owned one would bypass the ownership guard `subagents:rpc:stop` enforces. `subagents:rpc:get` returns owned agents because it returns a copy |
 
 The slot is claimed by the first activation only; subagent sessions re-activate this extension in the same process, and unconditionally overwriting would point the registry at a short-lived child manager whose shutdown would then delete the root session's entry ([#128](https://github.com/tintinweb/pi-subagents/pull/128)). Child activations leave it alone, and shutdown releases it only if this activation claimed it (`ownsManagerRegistry`, checked in the `session_shutdown` handler).

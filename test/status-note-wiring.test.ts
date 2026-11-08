@@ -155,7 +155,7 @@ describe("status note reaches the parent through the real handlers", () => {
     const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
 
     // External registry/RPC callers cannot mint internal ownership metadata.
-    const topId = registry.spawn(pi, ctx(), "general-purpose", "top", {
+    const topId = await registry.spawn(pi, ctx(), "general-purpose", "top", {
       description: "top-level owner",
       isBackground: false,
       parentAgentId: "forged-parent",

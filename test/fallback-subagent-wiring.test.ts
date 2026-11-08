@@ -242,8 +242,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     setFallbackSubagent(NO_FALLBACK);
     const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
 
-    expect(() => registry.spawn({}, ctx(), "definitely-missing", "do it", { description: "rpc" }))
-      .toThrow(/Unknown or disabled agent type/);
+    await expect(registry.spawn({}, ctx(), "definitely-missing", "do it", { description: "rpc" }))
+      .rejects.toThrow(/Unknown or disabled agent type/);
     expect(runAgent).not.toHaveBeenCalled();
   });
 });

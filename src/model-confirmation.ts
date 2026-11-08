@@ -5,7 +5,7 @@
  * An omitted `model` inherits the calling session's own model, so it costs
  * exactly what the caller's own turns cost. Naming one is therefore a
  * deliberate act, and the person who pays for it should see it before the child
- * starts. This module holds the ask; the four spawn paths hold the call.
+ * starts. This module holds the ask; the five spawn paths hold the call.
  *
  * State lives here (rather than in an index.ts closure) for the same reason
  * `scopeModels` lives in model-scope.ts: the top-level Agent tool and the nested
@@ -31,7 +31,7 @@ export interface ModelConfirmationRequest {
   /** Display name of the subagent about to spawn. */
   agentLabel: string;
   /** Which spawn path asked. */
-  source: "agent-tool" | "nested" | "workflow" | "rpc";
+  source: "agent-tool" | "nested" | "workflow" | "rpc" | "registry";
 }
 
 export type ModelConfirmationVerdict = { allowed: true } | { allowed: false; reason: string };
