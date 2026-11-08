@@ -81,4 +81,11 @@ describe("documented defaults (README:441)", () => {
     const { isScopeModelsEnabled } = await import("../src/model-scope.js");
     expect(isScopeModelsEnabled()).toBe(false);
   });
+
+  it("caller-named model confirmation is on by default", async () => {
+    // On is the point of the fork: an omitted model inherits the caller's own
+    // model, so naming one is a deliberate act. README documents the default.
+    const { isConfirmCallerModelEnabled } = await import("../src/model-confirmation.js");
+    expect(isConfirmCallerModelEnabled()).toBe(true);
+  });
 });

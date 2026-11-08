@@ -33,6 +33,7 @@ import { describeMention, handleBase, isReservedHandle, parseMention, resolveHan
 import { runMentionClone } from "./mention-clone.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
+import { isConfirmCallerModelEnabled, setConfirmCallerModel } from "./model-confirmation.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
@@ -1495,6 +1496,7 @@ export default function (pi: ExtensionAPI) {
     setBackgroundByDefault,
     setSchedulingEnabled,
     setScopeModels: setScopeModelsEnabled,
+    setConfirmCallerModel,
     setStrictAgentFiles: (b) => { strictAgentFiles = b; },
     setDisableDefaultAgents: setDisableDefaultAgents,
     setToolDescriptionMode: setToolDescriptionMode,
@@ -3435,6 +3437,13 @@ Terse command-style prompts produce shallow, generic work.
           values: ["on", "off"],
         },
         {
+          id: "confirmCallerModel",
+          label: "Confirm caller model",
+          description: "Ask before a subagent spawns with a model the calling agent named",
+          currentValue: isConfirmCallerModelEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
           id: "toolDescriptionMode",
           label: "Tool description",
           description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
@@ -3688,6 +3697,10 @@ Terse command-style prompts produce shallow, generic work.
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, target, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "confirmCallerModel") {
+        const enabled = value === "on";
+        setConfirmCallerModel(enabled);
+        notifyApplied(ctx, target, `Confirm caller model ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "strictAgentFiles") {
         const enabled = value === "on";
         strictAgentFiles = enabled;
