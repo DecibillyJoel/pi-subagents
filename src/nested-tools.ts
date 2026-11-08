@@ -17,7 +17,8 @@ import {
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { resolveModel } from "./model-resolver.js";
+import { confirmCallerSuppliedModel } from "./model-confirmation.js";
+import { describeModel, resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import {
   createOutputFilePath,
@@ -254,6 +255,21 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         modelInput: invocation.modelInput,
       });
       if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message, true);
+
+      // The caller named a model: ask the human partner through the context the
+      // top-level session registered. No resume guard is needed here, unlike the
+      // Agent tool: the `params.resume` early return above runs first and never
+      // reaches this block. `model` is non-null whenever `modelFromParams` is
+      // true, so the trailing guard is for the type checker only.
+      if (invocation.modelFromParams && model) {
+        const verdict = await confirmCallerSuppliedModel({
+          model: describeModel(model),
+          modelInput: invocation.modelInput ?? "",
+          agentLabel: config?.displayName ?? resolvedType,
+          source: "nested",
+        });
+        if (!verdict.allowed) return textResult(verdict.reason, true);
+      }
 
       // The whole branch shares the root session's transcript directory; read it
       // off the owning parent rather than this child session's own id.

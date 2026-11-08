@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
+import { setConfirmationCtx, setConfirmCallerModel } from "../src/model-confirmation.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager, setMaxSubagentDepth } from "../src/nested-tools.js";
 import { encodeCwd } from "../src/output-file.js";
@@ -13,6 +14,7 @@ let manager: NestedAgentManager;
 let records: Map<string, any>;
 let spawn: ReturnType<typeof vi.fn>;
 let spawnAndWait: ReturnType<typeof vi.fn>;
+let confirm: ReturnType<typeof vi.fn>;
 
 function writeAgent(name: string, extra = "") {
   const dir = join(cwd, ".pi", "agents");
@@ -64,6 +66,13 @@ beforeEach(() => {
   writeAgent("reviewer");
   registerAgents(loadCustomAgents(cwd));
   records = new Map();
+  // The nested tools have no session context of their own: they confirm through
+  // whatever the top-level session registered. Registered here rather than in
+  // the gate's own describe block, because the pre-existing tests above must
+  // keep spawning (they never name a model, so they never reach the gate).
+  confirm = vi.fn(async () => true);
+  setConfirmCallerModel(true);
+  setConfirmationCtx({ hasUI: true, ui: { confirm } });
   spawn = vi.fn((_pi, _ctx, type, _prompt, options) => {
     const id = `child-${records.size + 1}`;
     records.set(id, { id, type, status: "running", parentAgentId: options.parentAgentId });
@@ -86,6 +95,8 @@ beforeEach(() => {
 
 afterEach(() => {
   setScopeModelsEnabled(false);
+  setConfirmCallerModel(true);
+  setConfirmationCtx(undefined);
   rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -544,6 +555,89 @@ describe("child-safe nested Agent tools", () => {
     } as any, undefined, undefined, executionCtx);
 
     expect(spawnAndWait.mock.calls[0][1]).toBe(executionCtx);
+  });
+});
+
+// The nested path has no context of its own, so it asks through the one the
+// top-level session registered. These cases pin the three ways that can go: the
+// partner denies, the partner confirms, and nobody can be asked at all.
+describe("nested delegation gate on a caller-named model", () => {
+  it("refuses the spawn when the partner denies the model", async () => {
+    confirm.mockResolvedValueOnce(false);
+    const [agent] = tools();
+
+    const denied = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/allowed",
+    });
+
+    expect(denied.isError).toBe(true);
+    expect(denied.content[0].text).toContain('The human partner denied the model "anthropic/allowed"');
+    expect(spawnAndWait).not.toHaveBeenCalled();
+  });
+
+  it("spawns once the partner confirms", async () => {
+    const [agent] = tools();
+
+    const allowed = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/allowed",
+    });
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(allowed.isError).toBe(false);
+    expect(spawnAndWait).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses without a UI instead of asking, and never spawns", async () => {
+    setConfirmationCtx(undefined);
+    const [agent] = tools();
+
+    const refused = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/allowed",
+    });
+
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain("no UI is available to confirm it");
+    expect(spawnAndWait).not.toHaveBeenCalled();
+  });
+
+  it("asks exactly once per spawn", async () => {
+    const [agent] = tools();
+
+    await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/allowed",
+    });
+
+    // One spawn, one prompt. A second question for the same child would make
+    // the partner answer the same decision twice.
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ask for a model the agent file pinned", async () => {
+    writeAgent("pinned", "model: anthropic/allowed\n");
+    registerAgents(loadCustomAgents(cwd));
+    const [agent] = tools();
+
+    await execute(agent, {
+      subagent_type: "pinned",
+      description: "find files",
+      prompt: "Find them",
+    });
+
+    // A pinned model is the project owner's decision, not the caller's.
+    expect(confirm).not.toHaveBeenCalled();
+    expect(spawnAndWait).toHaveBeenCalledTimes(1);
   });
 });
 
