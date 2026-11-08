@@ -546,7 +546,7 @@ describe("createWorkflowHost — caller-named model confirmation", () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it("asks once per caller-named model, not once per spawn", async () => {
+  it("asks once per named spawn — two named spawns raise two prompts", async () => {
     const stub = stubManager();
     const host = createWorkflowHost({ pi: {} as any, ctx: namedCtx(), manager: stub.manager });
 

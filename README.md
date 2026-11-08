@@ -731,7 +731,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 When on, a spawn whose `model` the calling agent named is held until you confirm it. The prompt names the subagent, the resolved model, and the path the name came from. An omitted `model` inherits your session's own model, so it costs what your own turns cost and is never confirmed. Naming one is a deliberate act that the person paying for it otherwise never sees.
 
-**Every path that can name a model is gated:**
+**Every path that can name a model holds the spawn, and each returns its refusal in the shape its caller already understands:**
 
 | Path | Refusal shape |
 |---|---|
@@ -739,18 +739,21 @@ When on, a spawn whose `model` the calling agent named is held until you confirm
 | Nested delegation tools ([nested subagents](#nested-subagents)) | `isError` tool result carrying the reason. Nothing spawns |
 | A workflow's `agent(prompt, { model })` | `{ ok: false, error }` to the script, and `null` for that one agent |
 | Cross-extension RPC (`subagents:rpc:spawn`, e.g. pi-tasks `TaskExecute`) | A `throw` the caller sees as `{ success: false, error }` |
+| The manager registry (`Symbol.for("pi-subagents:manager")`) `spawn` | A rejected promise. The signature is `=> Promise<string>` |
 
 **Not gated:**
 
 - A `model:` in an agent file's frontmatter. The agent file already declares it, and you can read it there.
 - A parent-inherited model, because the caller named nothing.
 - A caller-named model on a `resume`. A reopen starts no new agent.
+- A scheduled run's own re-spawn when it fires. Naming the model was gated when you created the schedule.
+- A registry `spawn` naming a model the registry cannot resolve. That path never validated models, and it still passes an unresolvable name through unchanged.
 
 **No UI, no spawn.** Print mode (`-p`), JSON mode (`--mode json`), and a scheduled run whose session has no UI have no prompt to show. Those spawns are refused rather than silently allowed, and the refusal names the fix — drop `model`, or run interactively. Every other failure on the confirmation route denies too: a throw is a refusal, not an allow.
 
 The gate runs after the [model scope](#model-scope) check, so an out-of-scope caller-named model keeps its hard error and raises no prompt.
 
-**Design:** a `scopeModels`-style policy in one module, consulted by all four sites in the order resolve → scope-validate → confirm → spawn. The calling agent's own name for the model, not the frontmatter's, is the decision signal — so an agent file that pins a model is never held up by this.
+**Design:** a `scopeModels`-style policy in one module, consulted by all five sites in the order resolve → scope-validate → confirm → spawn. The calling agent's own name for the model, not the frontmatter's, is the decision signal — so an agent file that pins a model is never held up by this.
 
 ## Persistent Settings
 

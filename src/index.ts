@@ -783,10 +783,47 @@ export default function (pi: ExtensionAPI) {
     `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
     (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");
 
+  /**
+   * The `Symbol.for("pi-subagents:manager")` registry's own `spawn`. A model the
+   * caller named is put to the human partner first, exactly as on the four paths
+   * that issue an `Agent` call, and only then handed to `spawnTopLevel`.
+   *
+   * The gate belongs HERE and not in `spawnTopLevel`: the RPC handler passes
+   * `spawnTopLevel` as its own manager (see `registerRpcHandlers` below), so
+   * gating there would ask a second time about a model the RPC path already
+   * confirmed. `spawnTopLevel` stays the ungated funnel it was.
+   *
+   * `async` on every return path, including one that names nothing, so a single
+   * caller shape covers both and a refusal can arrive as a rejection.
+   *
+   * An unresolvable name is passed through unasked, exactly as before the gate
+   * existed: this path never validated models, and the review scoped the finding
+   * to confirmation. The residual gap is recorded in the SDD ledger.
+   */
+  const registrySpawn = async (piRef: any, ctxRef: any, type: string, prompt: string, options: any): Promise<string> => {
+    const override = options?.model;
+    if (override != null) {
+      // A Model instance carries its own provider and id. A string needs the
+      // registry first, and without one there is nothing to describe.
+      const registry: ModelRegistry | undefined = ctxRef?.modelRegistry;
+      const model = typeof override === "string" ? (registry ? resolveModel(override, registry) : undefined) : override;
+      if (model !== undefined && typeof model !== "string") {
+        const verdict = await confirmCallerSuppliedModel({
+          model: describeModel(model),
+          modelInput: typeof override === "string" ? override : `${override.provider}/${override.id}`,
+          agentLabel: type,
+          source: "registry",
+        });
+        if (!verdict.allowed) throw new Error(verdict.reason);
+      }
+    }
+    return spawnTopLevel(piRef, ctxRef, type, prompt, options);
+  };
+
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
-    spawn: spawnTopLevel,
+    spawn: registrySpawn,
     getRecord: (id: string) => {
       const record = manager.getRecord(id);
       return record !== undefined && isTopLevelAgent(record) ? record : undefined;
