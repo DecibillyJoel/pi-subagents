@@ -170,7 +170,7 @@ sequenceDiagram
 
 Two asymmetries to know about, stated as they are:
 
-- **Stop takes an id only**: its `getRecord` is the manager's plain lookup. Consume takes an id *or* an `@handle`: its `consumeResult` (both wired in the `session_start` handler, `src/index.ts`) goes through `resolveAgentRef`.
+- **Stop and interrupt take an id only**: both reach `assertOwned`, whose lookup is the manager's plain `getRecord`, so an `@handle` there answers "Agent not found". The `interrupt_subagent` tool and `/interrupt` take a handle, because both go through `interruptAgentCommands`, which resolves the reference first. Consume takes an id *or* an `@handle`: its `consumeResult` (both wired in the `session_start` handler, `src/index.ts`) goes through `resolveAgentRef`.
 - **Consume checks `parentAgentId` but not `workflowId`** (`consumeResult`, `src/index.ts`). A workflow-owned agent's result can be marked consumed over the bus even though the same agent cannot be stopped.
 
 The lifecycle events do **not** use this check. `subagents:created`, `:started`, `:completed`, `:failed`, `:steered` and `:compacted` fire for nested and workflow agents too, with `parentAgentId` or `workflowId` set (#442). To see only the session's own agents, ignore events where either is set; up to 0.24 the events carried only those. After the event fires, the `isTopLevelAgent` checks in the `AgentManager` callbacks (`src/index.ts`) still keep nested and workflow agents out of completion messages, the saved `subagents:record` and the widget. A nested or workflow agent sends `subagents:created` when it starts (it is never queued), and again on each resume.
