@@ -45,23 +45,35 @@ const INTERRUPT_OUTPUT_LIMIT_BYTES = 64 * 1024;
  * `INTERRUPT_OUTPUT_LIMIT_BYTES` bytes. A reasoned interrupt needs the text the
  * command already produced: pi attaches its accumulated output only for the
  * bare `aborted` sentinel, so the wrapper must carry the text itself.
+ *
+ * The buffer holds exactly the last `min(totalBytesAppended,
+ * INTERRUPT_OUTPUT_LIMIT_BYTES)` bytes at all times, so the tail never shrinks
+ * below the limit once the stream has reached it. The class is exported only so
+ * a unit test can drive the trimming directly. It is not a public API.
  */
-class TailBuffer {
+export class TailBuffer {
 	private readonly chunks: Buffer[] = [];
 	private bytes = 0;
 
 	append(chunk: Buffer): void {
 		this.chunks.push(chunk);
 		this.bytes += chunk.length;
-		while (this.bytes > INTERRUPT_OUTPUT_LIMIT_BYTES && this.chunks.length > 1) {
-			const dropped = this.chunks.shift();
-			if (dropped) this.bytes -= dropped.length;
+		// Drop a whole head chunk only while the rest still holds the full limit.
+		// Dropping more would keep fewer bytes than the limit.
+		while (this.chunks.length > 1) {
+			const head = this.chunks[0] as Buffer;
+			if (this.bytes - head.length < INTERRUPT_OUTPUT_LIMIT_BYTES) break;
+			this.chunks.shift();
+			this.bytes -= head.length;
 		}
-		const only = this.chunks[0];
-		if (this.bytes > INTERRUPT_OUTPUT_LIMIT_BYTES && only) {
-			const tail = only.subarray(only.length - INTERRUPT_OUTPUT_LIMIT_BYTES);
+		// Still over the limit: trim the front of the remaining head by exactly the
+		// overflow, so the buffer keeps the last limit bytes and not less.
+		if (this.bytes > INTERRUPT_OUTPUT_LIMIT_BYTES) {
+			const head = this.chunks[0] as Buffer;
+			const overflow = this.bytes - INTERRUPT_OUTPUT_LIMIT_BYTES;
+			const tail = head.subarray(overflow);
 			this.chunks[0] = tail;
-			this.bytes = tail.length;
+			this.bytes -= overflow;
 		}
 	}
 
