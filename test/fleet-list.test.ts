@@ -988,6 +988,28 @@ describe("FleetList command controls", () => {
     expect(h.manager.abort).toHaveBeenCalledWith("a3");
   });
 
+  it("drops the STOP hint when a roster shift leaves another row selected", () => {
+    const agents = [
+      makeRecord({ id: "a1", description: "one", startedAt: 1 }),
+      makeRecord({ id: "a2", description: "two", startedAt: 2 }),
+      makeRecord({ id: "a3", description: "three", startedAt: 3 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // → a1
+    h.press(DOWN); // → a2
+
+    h.press("x"); // arm a2
+    expect(h.render().some(l => l.includes("x again to STOP"))).toBe(true);
+
+    // a1 drops out, so the clamp moves the cursor onto a3 while a2 stays armed.
+    agents.splice(0, 1);
+
+    expect(h.render().some(l => l.includes("x again to STOP"))).toBe(false);
+    // The plain hint stays, so `x` is still advertised as a first press.
+    expect(h.render().some(l => l.includes("x stop"))).toBe(true);
+  });
+
   it("names both keys in the active hint", () => {
     const h = onAgent([makeRecord()]);
     const bar = h.render().join("\n");

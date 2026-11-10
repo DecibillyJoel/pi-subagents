@@ -522,10 +522,15 @@ export class FleetList {
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
     const sel = Math.min(this.selectedIndex, rows.length);
+    // Advertise a second press only when `x` would perform one: the armed id
+    // must still belong to the selected row, or a roster shift leaves the hint
+    // promising a stop that another row owns.
+    const selected = sel > 0 ? rows[sel - 1] : undefined;
+    const stopArmed = selected?.kind === "agent" && this.stopArmedId === selected.record.id;
 
     const hint = !this.active
       ? "esc to interrupt · ← for agents · ↓ to manage"
-      : this.stopArmedId !== undefined
+      : stopArmed
         ? "↑↓ select · x again to STOP · esc back"
         : "↑↓ select · enter view · x stop · i interrupt · esc back";
     const lines: string[] = [];
