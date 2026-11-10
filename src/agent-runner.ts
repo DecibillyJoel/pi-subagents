@@ -23,9 +23,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
+import type { CommandInterruptRegistry } from "./command-interrupt.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
+import { createInterruptibleBashTool } from "./interruptible-bash.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
@@ -46,6 +48,10 @@ export const SUBAGENT_TOOL_NAMES = {
   WORKFLOW: "SubagentWorkflow",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
+  // Not registered by this task. It is named here only so
+  // `EXCLUDED_TOOL_NAMES` derives it: a plain subagent must never inherit the
+  // tool, because a child cannot interrupt itself.
+  INTERRUPT: "interrupt_subagent",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -561,6 +567,12 @@ export interface RunOptions {
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
+  /**
+   * Registry that tracks running commands for this agent. When set, the child
+   * session's `bash` is the interruptible shadow, so a command it starts can be
+   * stopped from the parent. Without it the session keeps pi's own `bash`.
+   */
+  commandInterrupt?: CommandInterruptRegistry;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /**
@@ -1257,6 +1269,27 @@ export async function runAgent(
   // modelRuntime, but ExtensionContext still exposes only the registry facade.
   // Pass both so the full supported Pi range retains the parent's providers.
   const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
+  // A subagent's `bash` must register with the run's interrupt registry, so a
+  // parent can stop a long command. Swap pi's `bash` for the shadow — but only
+  // when this agent's scope still allows `bash` and a registry was supplied.
+  // Computed from whichever scope mechanism is in play: the static allowlist
+  // (`noExtensions`) or the deny set.
+  const bashAllowed = noExtensions
+    ? Boolean(sessionTools?.includes("bash"))
+    : !sessionExcludeTools?.includes("bash");
+  // The registry keys commands by agent id, so a run without one has nothing to
+  // interrupt and keeps pi's `bash`.
+  const interruptibleBash =
+    bashAllowed && options.commandInterrupt && options.agentId
+      ? createInterruptibleBashTool({
+          cwd: effectiveCwd,
+          agentId: options.agentId,
+          registry: options.commandInterrupt,
+          commandPrefix: sessionSettingsManager.getShellCommandPrefix(),
+          shellPath: sessionSettingsManager.getShellPath(),
+        })
+      : undefined;
+
   const sessionOpts: Parameters<typeof createAgentSession>[0] & {
     modelRegistry: ExtensionContext["modelRegistry"];
     modelRuntime?: unknown;
@@ -1273,7 +1306,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: [...nestedTools, ...structuredTools],
+    customTools: [...nestedTools, ...structuredTools, ...(interruptibleBash ? [interruptibleBash] : [])],
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {
