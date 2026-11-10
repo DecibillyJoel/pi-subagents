@@ -873,6 +873,7 @@ export default function (pi: ExtensionAPI) {
             return true;
           },
           steer: (id, message) => manager.steer(id, message),
+          interruptCommand: (id, reason) => manager.interruptCommand(id, reason),
         },
         // Read-only snapshots of workflow runs, for `workflow_get` / `workflow_list`.
         // A run is top-level, so there is no ownership to guard. `get` carries the

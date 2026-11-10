@@ -1,8 +1,8 @@
 /**
  * Cross-extension RPC handlers for the subagents extension.
  *
- * Exposes ping, spawn, stop, consume, steer, get, list, workflow_get, and
- * workflow_list RPCs over the pi.events event bus, using per-request scoped
+ * Exposes ping, spawn, stop, interrupt, consume, steer, get, list, workflow_get,
+ * and workflow_list RPCs over the pi.events event bus, using per-request scoped
  * reply channels.
  *
  * Reply envelope follows pi-mono convention:
@@ -110,6 +110,11 @@ export interface SpawnCapable {
    * `steer_subagent` does. False when the agent is unknown or has settled.
    */
   steer(id: string, message: string): boolean;
+  /**
+   * Abort the live commands of one agent and leave the agent itself running.
+   * Returns how many commands it aborted, 0 when none were live.
+   */
+  interruptCommand(id: string, reason?: string): number;
 }
 
 /** Read-only snapshots of workflow runs, for `workflow_get` / `workflow_list`. */
@@ -134,6 +139,7 @@ export interface RpcHandle {
   unsubStop: () => void;
   unsubConsume: () => void;
   unsubSteer: () => void;
+  unsubInterrupt: () => void;
   unsubGet: () => void;
   unsubList: () => void;
   unsubWorkflowGet: () => void;
@@ -165,7 +171,7 @@ function handleRpc<P extends { requestId: string }>(
 }
 
 /**
- * Register ping, spawn, stop, consume, steer, get, and list RPC handlers on the event bus.
+ * Register ping, spawn, stop, interrupt, consume, steer, get, and list RPC handlers on the event bus.
  * Returns unsub functions for cleanup.
  */
 export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
@@ -363,8 +369,22 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     return { workflows: workflows.list() };
   });
 
+  // A running command can outlast its usefulness — a test suite on a head that
+  // has already moved on, a build for a commit that is now superseded. The
+  // caller wants the command gone and the agent still alive, so this aborts the
+  // command rather than the agent. Zero interrupted is a valid answer, not a
+  // failure: the command may have finished between the caller's decision and
+  // this request. Additive channel, so the version handshake stays as it is.
+  const unsubInterrupt = handleRpc<
+    { requestId: string; agentId: string; reason?: unknown }
+  >(events, "subagents:rpc:interrupt", ({ agentId, reason }) => {
+    assertOwned(agentId);
+    if (reason !== undefined && typeof reason !== "string") throw new Error("Interrupt reason must be a string");
+    return { interrupted: manager.interruptCommand(agentId, reason) };
+  });
+
   return {
-    unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubGet, unsubList,
-    unsubWorkflowGet, unsubWorkflowList,
+    unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubInterrupt, unsubGet,
+    unsubList, unsubWorkflowGet, unsubWorkflowList,
   };
 }
