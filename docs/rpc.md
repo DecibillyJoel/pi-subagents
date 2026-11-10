@@ -1,6 +1,6 @@
 # Driving subagents from another extension
 
-Another pi extension can spawn a subagent, listen for subagent completion, read the result, steer and stop the run — all over the `pi.events` bus, without importing this package directly. Nine request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`, `subagents:rpc:workflow_get`, `subagents:rpc:workflow_list`), the lifecycle events in README's [event table](../README.md#events), two workflow-run events (`subagents:workflow_started`, `subagents:workflow_settled`), one per-message usage event (`subagents:usage`), one terminal `subagents:disposed`, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
+Another pi extension can spawn a subagent, listen for subagent completion, read the result, steer and stop the run, and interrupt the commands an agent is running — all over the `pi.events` bus, without importing this package directly. Ten request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:interrupt`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`, `subagents:rpc:workflow_get`, `subagents:rpc:workflow_list`), the lifecycle events in README's [event table](../README.md#events), two workflow-run events (`subagents:workflow_started`, `subagents:workflow_settled`), one per-message usage event (`subagents:usage`), one terminal `subagents:disposed`, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
 
 The thing worth understanding up front is that **the bus is in-process.** Every "RPC" call here is a synchronous `pi.events.emit` into the same event loop, and every reply comes back the same way. That single fact explains most of what follows: why `signal` and the `on*` callbacks work on a spawn payload at all, why a `consume` fired inside a `subagents:completed` handler lands *before* the notification decision has been made, and why none of this survives a real process boundary.
 
@@ -113,13 +113,17 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | `Agent is owned by another agent or workflow` | stop handler |
 | `settleTimeoutMs must be a number of milliseconds` | stop handler — `settleTimeoutMs` is set but is not a finite number. Checked before the abort, so nothing is stopped |
 | `Agent is not running` | stop handler. The agent exists, has finished, and nothing below it is still running |
+| `Agent not found` | interrupt handler, `src/cross-extension-rpc.ts` |
+| `Agent is owned by another agent or workflow` | interrupt handler |
+| `Interrupt reason must be a string` | interrupt handler — `reason` present and not a string |
 | `Agent not found or still running` | consume handler |
 | `Steer message must be a non-empty string` | steer handler — `message` missing, not a string, or whitespace |
 | `Agent not found` / `Agent is owned by another agent or workflow` / `Agent is not running` | steer handler — same lookup, ownership guard and settled check as stop |
 
-Three things the table cannot show:
+Four things the table cannot show:
 
 - **The failure that is not an error.** With `worktreeIsolation` off project-wide, `isolation: "worktree"` is dropped by the `isWorktreeIsolationEnabled()` check in `AgentManager.startAgent` with no error, no note on the record, and a success envelope on the wire. Your agent runs in the main tree. If you asked for isolation because two agents were going to write the same files, they now collide and nothing told you.
+- **A zero interrupt count is a success.** `subagents:rpc:interrupt` answers `{ interrupted: 0 }` when no command was live, because an agent that is idling has nothing to kill. Stop rejects the same situation with `Agent is not running`: an interrupt asks about a command, not the agent, and a running agent can have no command in flight.
 - **`data` is omitted** when a handler returns nothing, so a successful consume or steer reply is a bare `{ success: true }` and `reply.data.anything` throws. A successful stop replies `{ success: true, data: { settled } }`; see [Stopping](#stopping).
 - **`requestId` is not validated.** It is interpolated straight into the reply channel, so a caller that omits it gets its reply on the literal channel `subagents:rpc:spawn:reply:undefined` — where every other caller that omitted it is also listening. Send one, and send a unique one.
 
@@ -162,7 +166,7 @@ sequenceDiagram
 
 ## Ownership
 
-`isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts`). `subagents:rpc:stop` and `subagents:rpc:steer` enforce it through one shared check (`assertOwned` in `src/cross-extension-rpc.ts`): a nested or workflow agent belongs to an agent or workflow that is *waiting on it*, and stopping or redirecting it behind that owner's back makes the owner's step fail. The check matters in practice: the lifecycle events and `subagents:rpc:list` expose every agent's id, nested and workflow ones included, so a caller can name an agent it does not own. Reads (`get`, `list`) have no check.
+`isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts`). `subagents:rpc:stop`, `subagents:rpc:steer` and `subagents:rpc:interrupt` enforce it through one shared check (`assertOwned` in `src/cross-extension-rpc.ts`): a nested or workflow agent belongs to an agent or workflow that is *waiting on it*, and stopping, interrupting or redirecting it behind that owner's back makes the owner's step fail. The check matters in practice: the lifecycle events and `subagents:rpc:list` expose every agent's id, nested and workflow ones included, so a caller can name an agent it does not own. Reads (`get`, `list`) have no check.
 
 Two asymmetries to know about, stated as they are:
 
