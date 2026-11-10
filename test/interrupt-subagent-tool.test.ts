@@ -151,11 +151,11 @@ describe("the interrupt_subagent tool", () => {
   });
 
   it("stays out of a plain subagent's toolset", () => {
-    // `agent-runner.ts` builds its denylist from `Object.values(SUBAGENT_TOOL_NAMES)`
-    // and this file must not be edited here, so assert the fact the denylist
-    // depends on: the registered name is one of those values. The deny itself is
-    // exercised behaviourally in agent-runner.test.ts ("EXCLUDED_TOOL_NAMES never
-    // reach the allowlist").
+    // Cheap pin on the name only: the deny itself is exercised behaviourally in
+    // agent-runner.test.ts ("EXCLUDED_TOOL_NAMES never reach the allowlist even
+    // if an extension registers them"), which registers the tool and asserts the
+    // runner drops it. Keep both — this one catches a rename of the constant,
+    // that one catches a broken exclusion.
     expect(Object.values(SUBAGENT_TOOL_NAMES)).toContain("interrupt_subagent");
   });
 });
