@@ -22,6 +22,7 @@ import {
   createInterruptibleBashOperations,
   createInterruptibleBashTool,
   type InterruptibleBashOptions,
+  TailBuffer,
 } from "../src/interruptible-bash.js";
 
 /** One recorded call to the base operations. */
@@ -100,6 +101,93 @@ function options(calls: ExecCall[], overrides: Partial<InterruptibleBashOptions>
     ...overrides,
   };
 }
+
+/** A buffer of `length` copies of one ASCII byte, so byte count equals text length. */
+function fill(length: number, byte: string): Buffer {
+  return Buffer.alloc(length, byte);
+}
+
+const LIMIT = 64 * 1024;
+
+describe("TailBuffer", () => {
+  it("keeps no text before any append", () => {
+    const buffer = new TailBuffer();
+
+    expect(buffer.text()).toBe("");
+  });
+
+  it("keeps the whole chunk when it is smaller than the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(10, "a"));
+
+    expect(buffer.text()).toBe("a".repeat(10));
+  });
+
+  it("keeps the whole chunk when it is exactly the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(LIMIT, "a"));
+
+    expect(buffer.text().length).toBe(LIMIT);
+    expect(buffer.text()).toBe("a".repeat(LIMIT));
+  });
+
+  it("trims a single chunk larger than the limit to exactly the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(100_000, "a"));
+
+    expect(buffer.text().length).toBe(LIMIT);
+    expect(buffer.text()).toBe("a".repeat(LIMIT));
+  });
+
+  it("keeps the last limit bytes when the older chunk is exactly the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(LIMIT, "a"));
+    buffer.append(fill(4, "z"));
+
+    const text = buffer.text();
+    expect(text.length).toBe(LIMIT);
+    expect(text.endsWith("zzzz")).toBe(true);
+    expect(text.startsWith("a")).toBe(true);
+  });
+
+  it("keeps the last limit bytes for the exact [65536, 4] case", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(65536, "a"));
+    buffer.append(fill(4, "z"));
+
+    const text = buffer.text();
+    expect(text.length).toBe(LIMIT);
+    expect(text).toBe(`${"a".repeat(LIMIT - 4)}zzzz`);
+  });
+
+  it("keeps the last limit bytes when one chunk is far larger than the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(100_000, "a"));
+    buffer.append(fill(4, "z"));
+
+    const text = buffer.text();
+    expect(text.length).toBe(LIMIT);
+    expect(text).toBe(`${"a".repeat(LIMIT - 4)}zzzz`);
+  });
+
+  it("keeps exactly the limit after many small chunks", () => {
+    const buffer = new TailBuffer();
+    // 2000 chunks of 64 bytes is 128000 bytes, twice the limit.
+    for (let i = 0; i < 2000; i++) buffer.append(fill(64, i < 1500 ? "a" : "z"));
+
+    const text = buffer.text();
+    expect(text.length).toBe(LIMIT);
+    // The last 500 chunks are all "z" (32000 bytes), so the retained tail is
+    // 33536 bytes of "a" (524 whole chunks) followed by 32000 bytes of "z".
+    expect(text).toBe(`${"a".repeat(33536)}${"z".repeat(32000)}`);
+  });
+});
 
 describe("createInterruptibleBashTool", () => {
   it("returns a definition named bash", () => {
