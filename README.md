@@ -187,7 +187,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
                                                                                    ↓ 3 more
 ```
 
-Running [workflows](#subagentworkflow) appear as a single `workflow` row above the agents, carrying their agent counts in place of a description. `Enter` on one opens the same two-pane inspector `/agents → Workflows` does, rather than a conversation overlay. A run's own agents are *not* listed separately — they belong to the run, which reports for them, so they are filtered out of the fleet list, the above-editor widget, the `/agents` menus and `@handle` resolution exactly as nested children are. They are also outside the `maxConcurrent` pool: the run has its own concurrency cap, and routing a fan-out through the session pool as well would let one workflow starve everything else. The agents are ordered earliest-launched first, and only agents you can actually open are shown (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. The selected row renders in the theme's primary text color rather than the muted/dim treatment of the others; an agent with a configured `color` shows its badge there too, bolded. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `steer_subagent` tool does. On a running foreground `Agent` call, press `b` to hand that run to the background; the hint only shows where the handoff is available. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
+Running [workflows](#subagentworkflow) appear as a single `workflow` row above the agents, carrying their agent counts in place of a description. `Enter` on one opens the same two-pane inspector `/agents → Workflows` does, rather than a conversation overlay. A run's own agents are *not* listed separately — they belong to the run, which reports for them, so they are filtered out of the fleet list, the above-editor widget, the `/agents` menus and `@handle` resolution exactly as nested children are. They are also outside the `maxConcurrent` pool: the run has its own concurrency cap, and routing a fan-out through the session pool as well would let one workflow starve everything else. The agents are ordered earliest-launched first, and only agents you can actually open are shown (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. The selected row renders in the theme's primary text color rather than the muted/dim treatment of the others; an agent with a configured `color` shows its badge there too, bolded. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `steer_subagent` tool does. On a running foreground `Agent` call, press `b` to hand that run to the background; the hint only shows where the handoff is available. On the selected agent, press `x` twice to stop it, or press `i` to stop only the command it is running now and let the agent continue. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
 
 ### Fullscreen conversation observer
 
@@ -198,7 +198,7 @@ In pi's `/settings → TUI mode → fullscreen`, the observer supports:
 - Mouse-wheel scrolling. Scrolling up pauses automatic following; reaching the bottom resumes it.
 - A single-column scrollbar using pi's `│` track, `┃` thumb, and theme colors. The thumb becomes `█` while hovered or dragged. Track clicks page; holding and moving also drags.
 - pi's `/settings → Fullscreen scrollbar` preference applies to the observer: `auto` appears on scrolling or hovering and hides after one second of inactivity; `always` reserves a column and stays visible even when the conversation fits; `hidden` removes the rail and its mouse target. The observer reads the main session's settings when opened, without changing them.
-- Clickable footer controls for steering, stopping, Markdown mode, and closing. Stopping still takes two presses, as with `x`.
+- Clickable footer controls for steering, stopping, interrupting the running command, Markdown mode, and closing. Stopping still takes two presses, as with `x`. `i` interrupts immediately and appears only while a command is running.
 - Keyboard navigation and steering as before. Mouse scrolling also works while composing a steering message.
 - The bottom divider stays pinned above the footer (and steering composer when open). While scrolled away, a centered `[ ↓ N new messages · Ctrl+End ]` indicator within the divider counts new conversation messages, not streaming updates. Before any arrive, it reads `[ ↓ Jump to latest message · Ctrl+End ]`. Click it or press `Ctrl+End` to resume following and clear the count, without losing an open steering draft.
 
@@ -592,11 +592,25 @@ Send a steering message to a running agent. The message interrupts after the cur
 | `agent_id` | string | yes | Agent ID to steer |
 | `message` | string | yes | Message to inject into agent conversation |
 
+### `interrupt_subagent`
+
+Stop the commands running inside an agent, without stopping the agent. Use it when one command is wedged — a hung build, a stalled test run — and the agent should carry on with the rest of its work. A reasoned interrupt reports the command's buffered output (the last 64 KiB) and your reason back to the wrapper that awaited it. A reasonless interrupt keeps pi's own `Command aborted` text.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | The agent whose running commands to stop. An `@handle` also works — the agent's `name` if you gave it one, otherwise its type (`explore`, `explore-2`) |
+| `reason` | string | no | Why the command is being stopped. The wrapper that awaited the command reads this |
+
+The tool needs an explicit id or handle. It never guesses an agent, because an interrupt aimed at the wrong agent looks like a command that failed on its own. It reports how many live commands it stopped: `Interrupted 1 running command for "<agent>".`, or `No commands were running for "<agent>".` when nothing was live. The agent's record keeps its status and the run is not aborted.
+
+Parallel tool execution means one agent can have several commands live at once, so the tool stops all of them. A plain subagent never gets this tool (`EXCLUDED_TOOL_NAMES` in `src/agent-runner.ts`): a child cannot interrupt itself.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `/agents` | Interactive agent management menu — agent types, running agents, scheduled jobs, workflow runs, settings |
+| `/interrupt` | Stop the commands running inside one agent, without stopping the agent: `/interrupt <agent-id> [reason]` |
 
 `/agents → Workflows` (shown only when [workflows](#persistent-settings) are on) opens a framed two-pane inspector over a run, with two levels of depth:
 
@@ -644,7 +658,7 @@ Create new agent                            ← manual wizard or AI-generated
 Settings                                    ← max concurrency (background + foreground), max turns, grace turns, join mode
 ```
 
-- **Running agents** — select one to open its live conversation viewer. While it's still running, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns). On a live foreground run, press `b` to hand the same session and in-flight work to the background without stopping or restarting it — the blocked `Agent` call returns the agent ID and the run notifies on completion like any background agent. Press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call, but no longer reaches one that has been handed off — `x` here does). A stopped agent reports its partial output flagged as incomplete, not as a completion. `m` cycles how much of the transcript renders as Markdown — see [Viewer markdown](#persistent-settings).
+- **Running agents** — select one to open its live conversation viewer. While it's still running, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns). On a live foreground run, press `b` to hand the same session and in-flight work to the background without stopping or restarting it — the blocked `Agent` call returns the agent ID and the run notifies on completion like any background agent. Press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call, but no longer reaches one that has been handed off — `x` here does). A stopped agent reports its partial output flagged as incomplete, not as a completion. Press `i` to interrupt only the command the agent is running now, with no confirmation and immediately — see [`interrupt_subagent`](#interrupt_subagent). The agent keeps running and carries on with its remaining work. `m` cycles how much of the transcript renders as Markdown — see [Viewer markdown](#persistent-settings).
 - **Agent types** — unified list with source indicators: `•` (project), `◦` (global), `▪` ([package](docs/packages.md)), `✕` (disabled), explained by a legend naming only the badges actually on screen. Each row shows the agent's model, and the highlighted agent's full description appears below the list — prefixed with the declaring package's name for a `▪` agent, since the badge alone doesn't say *which* package. The model column flags `(unavailable, fallback: inherit)` when a configured model can't be resolved (it would silently inherit the parent model), and shows `(→ provider/id)` when it resolves to a different provider or version than configured. Select an agent to manage it:
   - **Default agents** (no override): Eject (export as `.md`), Disable
   - **Default agents** (ejected/overridden): Edit, Disable, Reset to default, Delete
@@ -900,7 +914,7 @@ The four agent-lifecycle events — `subagents:started`, `:completed`, `:failed`
 
 ## Cross-Extension RPC
 
-Other pi extensions can spawn and stop subagents programmatically via the `pi.events` event bus, without importing this package directly.
+Other pi extensions can spawn subagents, stop them, and interrupt the commands they are running, all programmatically via the `pi.events` event bus, without importing this package directly.
 
 All RPC replies use a standardized envelope: `{ success: true, data?: T }` on success, `{ success: false, error: string }` on failure.
 
@@ -971,6 +985,21 @@ const unsub = pi.events.on(`subagents:rpc:stop:reply:${requestId}`, (reply) => {
 });
 pi.events.emit("subagents:rpc:stop", { requestId, agentId: "agent-id-here" });
 ```
+
+### Interrupt
+
+Stop only the commands an agent is running, when one is wedged and the agent should keep working (the bus-side half of `interrupt_subagent`):
+
+```typescript
+const requestId = crypto.randomUUID();
+const unsub = pi.events.on(`subagents:rpc:interrupt:reply:${requestId}`, (reply) => {
+  unsub();
+  if (reply.success) console.log(`Interrupted ${reply.data?.interrupted ?? 0}`);
+});
+pi.events.emit("subagents:rpc:interrupt", { requestId, agentId: "agent-id-here", reason: "The build hung on the lock file." });
+```
+
+The same ownership guard as stop applies (`Agent not found`, `Agent is owned by another agent or workflow`). Unlike stop, **zero is a normal reply**: `{ interrupted: 0 }` says no command was live, and the agent still runs as it did. `reason` is optional and must be a string when present. The agent's status does not change, no run is aborted, and no event is emitted.
 
 ### Consume
 

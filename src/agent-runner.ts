@@ -48,9 +48,9 @@ export const SUBAGENT_TOOL_NAMES = {
   WORKFLOW: "SubagentWorkflow",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
-  // Not registered by this task. It is named here only so
-  // `EXCLUDED_TOOL_NAMES` derives it: a plain subagent must never inherit the
-  // tool, because a child cannot interrupt itself.
+  // Registered alongside the other tools in `index.ts`, but never inherited by
+  // a subagent: a child cannot interrupt itself, so `EXCLUDED_TOOL_NAMES`
+  // keeps it out of every nested tool list.
   INTERRUPT: "interrupt_subagent",
 } as const;
 

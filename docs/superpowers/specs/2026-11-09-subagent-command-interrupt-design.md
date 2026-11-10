@@ -218,6 +218,33 @@ Two surfaces, one new key.
 `registerCommand("agents", ...)` at line 4423. It reports the same
 result as the tool.
 
+## Known Limitations
+
+- **A resumed agent does not get the `bash` shadow installed again.**
+  `resumeAgent` (`src/agent-runner.ts:1428`) takes the session that the
+  original run created (`record.session`, passed at
+  `src/agent-manager.ts:1287` and `:1409`) and only calls `observeRun` and
+  `session.prompt`. It never builds `customTools`, so the shadow is not
+  installed a second time. The shadow is installed once, in `runAgent`
+  (`src/agent-runner.ts:1272-1295`), and reaches the session through
+  `customTools` (`src/agent-runner.ts:1309`).
+- **The missing re-install does not lose tracking today.** A pi session
+  keeps its injected custom tools for the life of the object
+  (`this._customTools` at
+  `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js:182`,
+  re-applied by `_refreshToolRegistry` at `:2817`). The resumed session is
+  the same object, with the same registry and the same agent id, so an
+  interrupt during a resumed run finds the live command and reports it as
+  usual. A resumed agent does not show the reported gap.
+- **A rebuilt session would lose it.** If a future change builds a session
+  outside `runAgent`, the shadow is gone and `interrupt_subagent` reports
+  `No commands were running for "<agent>".` while a command is live. No
+  such path exists today: `createAgentSession` has one call site,
+  `src/agent-runner.ts:1319`.
+- **A reasonless interrupt is not distinguishable from a real abort.**
+  The child keeps pi's `Command aborted` text, as the human partner chose.
+  A caller that must tell the two apart has to pass a `reason`.
+
 ## What Is Left To The Builder
 
 - Pin the exact cause of the missing `x` in a live session. The footer
