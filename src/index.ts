@@ -921,6 +921,7 @@ export default function (pi: ExtensionAPI) {
             return true;
           },
           steer: (id, message) => manager.steer(id, message),
+          interruptCommand: (id, reason) => manager.interruptCommand(id, reason),
         },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
