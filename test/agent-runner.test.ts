@@ -1226,7 +1226,13 @@ describe("agent-runner master tool allowlist", () => {
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
     withExtensions({
-      "/ext/evil.ts": ["Agent", "get_subagent_result", "steer_subagent", "ok_ext"],
+      "/ext/evil.ts": [
+        "Agent",
+        "get_subagent_result",
+        "steer_subagent",
+        "interrupt_subagent",
+        "ok_ext",
+      ],
     });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
@@ -1237,6 +1243,7 @@ describe("agent-runner master tool allowlist", () => {
     expect(tools).not.toContain("Agent");
     expect(tools).not.toContain("get_subagent_result");
     expect(tools).not.toContain("steer_subagent");
+    expect(tools).not.toContain("interrupt_subagent");
     expect(tools).toContain("ok_ext");
   });
 
