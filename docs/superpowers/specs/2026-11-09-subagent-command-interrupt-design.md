@@ -164,15 +164,19 @@ registry and returns the count. It also exposes `isCommandRunning(id)`
 for the UI.
 
 The registry must also receive the child's `commandPrefix` and
-`shellPath`, so the shadow tool keeps the user's shell setup. The
-manager reads them from the settings manager and threads them through
-`RunAgentOptions` beside the registry.
+`shellPath`, so the shadow tool keeps the user's shell setup. The design
+threaded them from the manager through `RunAgentOptions` beside the
+registry. Shipped instead: `runAgent` reads both from its own
+`sessionSettingsManager` where it builds the shadow
+(`src/agent-runner.ts:1288-1289`), so `RunAgentOptions` carries only
+`commandInterrupt`.
 
 ### Parent agent tool
 
 `src/index.ts` gains `interrupt_subagent`, built with the existing
-`defineTool` pattern near line 3073. Parameters: `agentId` (string,
-required) and `reason` (string, optional). The result reports how many
+`defineTool` pattern near line 3073. Parameters: `agent_id` (string,
+required) and `reason` (string, optional) — shipped in snake_case, to
+match the other agent tools. The result reports how many
 commands were killed, or that no command was running.
 
 Ownership is top-level only, matching the existing RPC `stop` handler's
@@ -188,7 +192,7 @@ its parent's command.
 `src/cross-extension-rpc.ts` gains a channel, matching the existing
 `stop` shape at line 201:
 
-- Request `subagents:rpc:interrupt` with `{ requestId, agentId }`.
+- Request `subagents:rpc:interrupt` with `{ requestId, agentId, reason? }`.
 - Reply `subagents:rpc:interrupt:reply:${requestId}`.
 
 ### UI
@@ -214,8 +218,9 @@ Two surfaces, one new key.
 
 ### Slash command
 
-`src/index.ts` gains `/interrupt <agentId>`, next to
-`registerCommand("agents", ...)` at line 4423. It reports the same
+`src/index.ts` gains `/interrupt <agent-id> [reason]`, next to
+`registerCommand("agents", ...)` at line 4423. The first token names the
+agent and the rest of the line is the reason. It reports the same
 result as the tool.
 
 ## Known Limitations
@@ -230,17 +235,20 @@ result as the tool.
   `customTools` (`src/agent-runner.ts:1309`).
 - **The missing re-install does not lose tracking today.** A pi session
   keeps its injected custom tools for the life of the object
-  (`this._customTools` at
-  `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js:182`,
-  re-applied by `_refreshToolRegistry` at `:2817`). The resumed session is
+  (`this._customTools` in
+  `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js`,
+  re-applied by `_refreshToolRegistry`). The resumed session is
   the same object, with the same registry and the same agent id, so an
   interrupt during a resumed run finds the live command and reports it as
   usual. A resumed agent does not show the reported gap.
 - **A rebuilt session would lose it.** If a future change builds a session
   outside `runAgent`, the shadow is gone and `interrupt_subagent` reports
   `No commands were running for "<agent>".` while a command is live. No
-  such path exists today: `createAgentSession` has one call site,
-  `src/agent-runner.ts:1319`.
+  such path exists today. `createAgentSession` has two call sites:
+  `src/agent-runner.ts:1319`, which builds the shadow, and
+  `src/mention-clone.ts:156`. The clone allowlists its own tool
+  (`tools: [cloneAgentTool.name]`), so its session holds no `bash` and no
+  interruptible command.
 - **A reasonless interrupt is not distinguishable from a real abort.**
   The child keeps pi's `Command aborted` text, as the human partner chose.
   A caller that must tell the two apart has to pass a `reason`.
