@@ -17,6 +17,7 @@
 import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import type { AgentManager } from "../agent-manager.js";
+import { describeInterrupt } from "../command-interrupt.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { agentTree } from "./agent-tree.js";
@@ -150,6 +151,8 @@ export class FleetList {
   private hoverIndex: number | undefined;
   /** Roster index of each line the last render emitted; `undefined` for non-row lines. */
   private lineRoster: (number | undefined)[] = [];
+  /** Set by the first `x`; the second stops the selected agent. */
+  private stopArmed = false;
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
   private viewingAgentId: string | undefined;
@@ -451,17 +454,46 @@ export class FleetList {
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
+      this.stopArmed = false;
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
       this.selectedIndex -= 1;
+      this.stopArmed = false;
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
     if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
+
+    // Stop or interrupt the selected agent without opening its viewer. Both
+    // keys act on an agent row only: `main` and a workflow run have nothing of
+    // their own to stop. `i` needs no confirmation — it kills the command and
+    // the agent keeps running — while `x` ends the agent, so it is two-press.
+    if (matchesKey(data, "x") || matchesKey(data, "i")) {
+      const entry = this.roster()[this.selectedIndex];
+      if (!entry || entry.kind !== "agent") return { consume: true };
+      const record = entry.record;
+      if (matchesKey(data, "i")) {
+        this.stopArmed = false;
+        const count = this.manager.isCommandRunning(record.id) ? this.manager.interruptCommand(record.id) : 0;
+        this.ui?.notify(describeInterrupt(record.description, count), "info");
+        this.update();
+        return { consume: true };
+      }
+      if (record.status === "running" || record.status === "queued") {
+        if (this.stopArmed) {
+          this.stopArmed = false;
+          if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
+        } else {
+          this.stopArmed = true;
+        }
+        this.update();
+      }
+      return { consume: true };
+    }
 
     // Any other key cancels navigation and flows to the editor.
     this.deactivate();
@@ -518,6 +550,7 @@ export class FleetList {
   private deactivate(): void {
     this.active = false;
     this.selectedIndex = 0;
+    this.stopArmed = false;
     this.update();
   }
 
@@ -571,6 +604,10 @@ export class FleetList {
           this.onViewerMarkdown,
           this.scrollbarMode(),
           this.backgroundAction?.(record, message => this.ui?.notify(message, "info")),
+          () => {
+            const count = this.manager.interruptCommand(record.id);
+            this.ui?.notify(describeInterrupt(record.description, count), "info");
+          },
         );
       },
       {
@@ -612,9 +649,11 @@ export class FleetList {
     // The `❯` row: the hover, else the keyboard's selection while it navigates.
     const cursor = this.hoverIndex ?? (this.active ? sel : undefined);
 
-    const hint = this.active
-      ? "↑↓ select · enter view · esc back"
-      : "esc to interrupt · ← for agents · ↓ to manage";
+    const hint = !this.active
+      ? "esc to interrupt · ← for agents · ↓ to manage"
+      : this.stopArmed
+        ? "↑↓ select · x again to STOP · esc back"
+        : "↑↓ select · enter view · x stop · i interrupt · esc back";
     const lines: string[] = [];
     const lineRoster: (number | undefined)[] = [];
     const push = (line: string, rosterIndex?: number): void => {

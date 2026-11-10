@@ -98,3 +98,14 @@ export class CommandInterruptRegistry {
     this.byAgent.delete(agentId);
   }
 }
+
+/**
+ * The one wording for an interrupt result, shared by every surface that offers
+ * the key (the `/interrupt` tool, the fleet list, the conversation viewer), so
+ * a count reported from one place reads the same as from another.
+ */
+export function describeInterrupt(description: string, count: number): string {
+  if (count === 0) return `No commands were running for "${description}".`;
+  if (count === 1) return `Interrupted 1 running command for "${description}".`;
+  return `Interrupted ${count} running commands for "${description}".`;
+}

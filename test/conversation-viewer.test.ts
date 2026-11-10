@@ -969,3 +969,82 @@ describe("ConversationViewer", () => {
     });
   });
 });
+
+describe("interrupt key", () => {
+  const W = 80;
+  const stripAnsi = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+  /** The activity the extension keeps while a bash call is live. */
+  const liveCommand = () => ({
+    activeTools: new Map([["call-1", "bash"]]),
+    toolUses: 1,
+    responseText: "",
+    turnCount: 1,
+  }) as any;
+
+  /** The idle footer row: second to last, above the bottom border. */
+  const footerOf = (lines: string[]) => stripAnsi(lines[lines.length - 2]);
+
+  it("offers i and interrupts while a command is live", () => {
+    const onInterrupt = vi.fn();
+    const viewer = new ConversationViewer(
+      mockTui(30, W), mockSession([]), mockRecord({ status: "running" }), liveCommand(),
+      ansiTheme(), vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, "auto", undefined, onInterrupt,
+    );
+
+    expect(footerOf(viewer.render(W))).toContain("i interrupt");
+
+    viewer.handleInput("i");
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("has no i affordance and ignores i when no command is live", () => {
+    const onInterrupt = vi.fn();
+    const viewer = new ConversationViewer(
+      mockTui(30, W), mockSession([]), mockRecord({ status: "running" }), undefined,
+      ansiTheme(), vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, "auto", undefined, onInterrupt,
+    );
+
+    expect(viewer.render(W).join("\n")).not.toContain("i interrupt");
+    expect(() => viewer.handleInput("i")).not.toThrow();
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
+  it("counts only a bash command as interruptible", () => {
+    const onInterrupt = vi.fn();
+    const activity = { ...liveCommand(), activeTools: new Map([["call-1", "read"]]) };
+    const viewer = new ConversationViewer(
+      mockTui(30, W), mockSession([]), mockRecord({ status: "running" }), activity,
+      ansiTheme(), vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, "auto", undefined, onInterrupt,
+    );
+
+    expect(viewer.render(W).join("\n")).not.toContain("i interrupt");
+    viewer.handleInput("i");
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
+  it("keeps every action label whole where the nav hint cannot also fit", () => {
+    // 70 columns leaves 66 inner cells. Every action plus " · " separators takes
+    // 53, so the 34-cell nav hint cannot also fit. The old composition laid the
+    // hint out at full width and then truncated the row from the right, which cut
+    // "Esc close" down to "E…" — invisible and, because footerTargets is built
+    // from whole labels, unclickable. That is the reported bug.
+    const onStop = vi.fn();
+    const viewer = new ConversationViewer(
+      mockTui(30, 70), mockSession([]), mockRecord({ status: "running" }), liveCommand(),
+      ansiTheme(), vi.fn(), onStop, undefined, vi.fn(), false, undefined, undefined, "auto", undefined, vi.fn(),
+    );
+    const lines = viewer.render(70);
+    const footer = footerOf(lines);
+
+    for (const label of ["Enter steer", "i interrupt", "x stop", "m md", "Esc close"]) {
+      expect(footer).toContain(label);
+    }
+    assertAllLinesFit(lines, 70);
+
+    // Stop still works at this width.
+    viewer.handleInput("x");
+    viewer.handleInput("x");
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+});
