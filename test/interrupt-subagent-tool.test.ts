@@ -139,6 +139,7 @@ describe("the interrupt_subagent tool", () => {
     const result = await interruptTool(booted.tools, { agent_id: booted.id });
 
     expect(textOf(result)).toContain("Agent is owned by another agent or workflow");
+    expect(result.isError).toBe(true);
     expect(handle.signal.aborted).toBe(false);
   });
 
@@ -148,6 +149,7 @@ describe("the interrupt_subagent tool", () => {
     const result = await interruptTool(booted.tools, { agent_id: "agent-that-never-existed" });
 
     expect(textOf(result)).toContain("Agent not found");
+    expect(result.isError).toBe(true);
   });
 
   it("stays out of a plain subagent's toolset", () => {
@@ -192,6 +194,6 @@ describe("the /interrupt command", () => {
     await expect(booted.commands.get("interrupt").handler("", commandCtx)).resolves.toBeUndefined();
 
     expect(commandCtx.ui.notify).toHaveBeenCalled();
-    expect(String(commandCtx.ui.notify.mock.calls[0][0])).toContain("/interrupt");
+    expect(String(commandCtx.ui.notify.mock.calls[0][0])).toContain("/interrupt <agent-id|@handle>");
   });
 });

@@ -89,6 +89,11 @@ function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
 }
 
+/** Tool execute return value for a refused command: same shape, marked failed. */
+function errorResult(msg: string, details?: AgentDetails) {
+  return { ...textResult(msg, details), isError: true };
+}
+
 export function renderRunningAgentStatus(
   frame: string,
   statsText: string,
@@ -3278,7 +3283,9 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const outcome = interruptAgentCommands(params.agent_id, params.reason);
-      return textResult(outcome.message);
+      // A refusal is a failure. Only the zero-command answer stays a normal
+      // result, because the command did run and simply had nothing live.
+      return outcome.ok ? textResult(outcome.message) : errorResult(outcome.message);
     },
   }));
 
@@ -4491,7 +4498,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const split = trimmed.search(/\s/);
       const ref = split === -1 ? trimmed : trimmed.slice(0, split);
       if (!ref) {
-        ctx.ui.notify("Usage: /interrupt <agent-id> [reason]", "warning");
+        ctx.ui.notify("Usage: /interrupt <agent-id|@handle> [reason]", "warning");
         return;
       }
       const reason = split === -1 ? undefined : trimmed.slice(split + 1).trim();

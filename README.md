@@ -610,7 +610,7 @@ Parallel tool execution means one agent can have several commands live at once, 
 | Command | Description |
 |---------|-------------|
 | `/agents` | Interactive agent management menu — agent types, running agents, scheduled jobs, workflow runs, settings |
-| `/interrupt` | Stop the commands running inside one agent, without stopping the agent: `/interrupt <agent-id> [reason]` |
+| `/interrupt` | Stop the commands running inside one agent, without stopping the agent: `/interrupt <agent-id\|@handle> [reason]` |
 
 `/agents → Workflows` (shown only when [workflows](#persistent-settings) are on) opens a framed two-pane inspector over a run, with two levels of depth:
 
