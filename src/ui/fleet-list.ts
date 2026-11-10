@@ -151,8 +151,13 @@ export class FleetList {
   private hoverIndex: number | undefined;
   /** Roster index of each line the last render emitted; `undefined` for non-row lines. */
   private lineRoster: (number | undefined)[] = [];
-  /** Set by the first `x`; the second stops the selected agent. */
-  private stopArmed = false;
+  /**
+   * Set by the first `x` to the armed record's id; the second `x` on that same
+   * record stops it. The id, not a bare flag: the roster is positional and an
+   * agent above the armed row can finish and drop out, which would move another
+   * agent into the armed spot.
+   */
+  private stopArmedId: string | undefined;
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
   private viewingAgentId: string | undefined;
@@ -454,14 +459,14 @@ export class FleetList {
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
-      this.stopArmed = false;
+      this.stopArmedId = undefined;
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
       this.selectedIndex -= 1;
-      this.stopArmed = false;
+      this.stopArmedId = undefined;
       this.update();
       return { consume: true };
     }
@@ -477,18 +482,21 @@ export class FleetList {
       if (!entry || entry.kind !== "agent") return { consume: true };
       const record = entry.record;
       if (matchesKey(data, "i")) {
-        this.stopArmed = false;
-        const count = this.manager.isCommandRunning(record.id) ? this.manager.interruptCommand(record.id) : 0;
+        this.stopArmedId = undefined;
+        // Asked unconditionally: the manager owns the "nothing is running"
+        // answer, and a zero count must reach describeInterrupt so the user is
+        // told so rather than seeing silence.
+        const count = this.manager.interruptCommand(record.id);
         this.ui?.notify(describeInterrupt(record.description, count), "info");
         this.update();
         return { consume: true };
       }
       if (record.status === "running" || record.status === "queued") {
-        if (this.stopArmed) {
-          this.stopArmed = false;
+        if (this.stopArmedId === record.id) {
+          this.stopArmedId = undefined;
           if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
         } else {
-          this.stopArmed = true;
+          this.stopArmedId = record.id;
         }
         this.update();
       }
@@ -550,7 +558,7 @@ export class FleetList {
   private deactivate(): void {
     this.active = false;
     this.selectedIndex = 0;
-    this.stopArmed = false;
+    this.stopArmedId = undefined;
     this.update();
   }
 
@@ -651,7 +659,7 @@ export class FleetList {
 
     const hint = !this.active
       ? "esc to interrupt · ← for agents · ↓ to manage"
-      : this.stopArmed
+      : this.stopArmedId !== undefined
         ? "↑↓ select · x again to STOP · esc back"
         : "↑↓ select · enter view · x stop · i interrupt · esc back";
     const lines: string[] = [];
