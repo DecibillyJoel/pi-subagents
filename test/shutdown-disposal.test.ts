@@ -38,7 +38,10 @@ function makePi() {
       emit: vi.fn(),
       on: vi.fn((event: string, handler: any) => {
         events.set(event, handler);
-        return vi.fn();
+        // pi.events.on hands back the disposer the activation stores in its
+        // RpcHandle. Model it honestly — calling it detaches the listener — so a
+        // test can prove `session_shutdown` released the channel.
+        return vi.fn(() => events.delete(event));
       }),
     },
     appendEntry: vi.fn(),
@@ -103,6 +106,21 @@ describe("session_shutdown disposes activation-owned resources (#256)", () => {
 
     expect(widgetDispose).toHaveBeenCalledTimes(1);
     expect(groupJoinDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("unsubscribes the interrupt RPC channel on shutdown", async () => {
+    const { pi, lifecycle, events } = makePi();
+    subagentsExtension(pi);
+    // The RPC handlers are wired on the first bound session_start (#142), not at
+    // factory time, so the activation must reach it before interrupt exists.
+    await lifecycle.get("session_start")?.({}, ctx());
+    expect(events.has("subagents:rpc:interrupt")).toBe(true);
+
+    await lifecycle.get("session_shutdown")?.({}, ctx());
+
+    // A stale listener would answer a later request from a manager whose agents
+    // were torn down, and the next activation would add a second one.
+    expect(events.has("subagents:rpc:interrupt")).toBe(false);
   });
 
   it("does not dispose them on session_before_switch — a vetoed switch must keep the live UI", async () => {

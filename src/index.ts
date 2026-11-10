@@ -1191,6 +1191,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle?.unsubSteer();
+    rpcHandle?.unsubInterrupt();
     rpcHandle = undefined;
     currentCtx = undefined;
     setConfirmationCtx(undefined);
