@@ -146,51 +146,52 @@ file.
 
 ### Child session wiring
 
-`src/agent-runner.ts` builds `sessionOpts` near line 1258. Two changes:
+`src/agent-runner.ts` builds `sessionOpts` in `runAgent`. Two changes:
 
-- Add the interrupt tool to `customTools` at line 1276, but only when
+- Add the interrupt tool to `customTools`, but only when
   `bash` passes the session tool scope. With an allowlist, bash is in
   `sessionTools`. With the deny path, bash is absent from
   `sessionExcludeTools`.
 - Thread a `commandInterrupt` registry and the `agentId` through
-  `RunAgentOptions`.
+  `RunOptions`.
 
 ### Manager
 
 `src/agent-manager.ts` owns one `CommandInterruptRegistry`. It passes
-the registry into `runAgent` at line 825. It gains
+the registry into `runAgent`. It gains
 `interruptCommand(id, reason?): number`, which delegates to the
 registry and returns the count. It also exposes `isCommandRunning(id)`
 for the UI.
 
 The registry must also receive the child's `commandPrefix` and
 `shellPath`, so the shadow tool keeps the user's shell setup. The design
-threaded them from the manager through `RunAgentOptions` beside the
+threaded them from the manager through `RunOptions` beside the
 registry. Shipped instead: `runAgent` reads both from its own
 `sessionSettingsManager` where it builds the shadow
-(`src/agent-runner.ts:1288-1289`), so `RunAgentOptions` carries only
-`commandInterrupt`.
+(`src/agent-runner.ts:1288-1289`). `RunOptions` carries `agentId`
+(`src/agent-runner.ts:510`) and `commandInterrupt`
+(`src/agent-runner.ts:575`). The shadow installs only when the session
+allows `bash` and both are set, and it keys its commands by `agentId`.
 
 ### Parent agent tool
 
 `src/index.ts` gains `interrupt_subagent`, built with the existing
-`defineTool` pattern near line 3073. Parameters: `agent_id` (string,
-required) and `reason` (string, optional) — shipped in snake_case, to
-match the other agent tools. The result reports how many
-commands were killed, or that no command was running.
+`defineTool` pattern. Parameters: `agent_id` (string, required) and
+`reason` (string, optional) — shipped in snake_case, to match the other
+agent tools. The result reports how many commands were killed, or that
+no command was running.
 
 Ownership is top-level only, matching the existing RPC `stop` handler's
-`assertOwned` rule (`src/cross-extension-rpc.ts:200`). Add `INTERRUPT:
-"interrupt_subagent"` to `SUBAGENT_TOOL_NAMES`
-(`src/agent-runner.ts:44-49`). `EXCLUDED_TOOL_NAMES` derives from
-`Object.values(SUBAGENT_TOOL_NAMES)`, so a plain subagent does not
-inherit the tool. A subagent therefore cannot interrupt a sibling's or
-its parent's command.
+`assertOwned` rule in `src/cross-extension-rpc.ts`. Add `INTERRUPT:
+"interrupt_subagent"` to `SUBAGENT_TOOL_NAMES`. `EXCLUDED_TOOL_NAMES`
+derives from `Object.values(SUBAGENT_TOOL_NAMES)`, so a plain subagent
+does not inherit the tool. A subagent therefore cannot interrupt a
+sibling's or its parent's command.
 
 ### Cross-extension RPC
 
 `src/cross-extension-rpc.ts` gains a channel, matching the existing
-`stop` shape at line 201:
+`subagents:rpc:stop` channel:
 
 - Request `subagents:rpc:interrupt` with `{ requestId, agentId, reason? }`.
 - Reply `subagents:rpc:interrupt:reply:${requestId}`.
@@ -209,8 +210,8 @@ Two surfaces, one new key.
   row can exceed `innerW` and clip the middle actions, which is the
   likely cause of the missing `x`. The fix keeps the action labels
   intact and shortens or drops the navigation hint first.
-- Both openers pass `onInterrupt`: `src/index.ts` around line 3418 and
-  `src/ui/fleet-list.ts` around line 433.
+- Both openers pass `onInterrupt`: the `ConversationViewer` call site in
+  `src/index.ts` and the one in `src/ui/fleet-list.ts`.
 - Liveness source: `ConversationViewer` already receives the agent's
   `AgentActivity` object. That object re-renders on `tool_execution_*`
   events through the session subscription. The viewer reads the live
@@ -219,9 +220,9 @@ Two surfaces, one new key.
 ### Slash command
 
 `src/index.ts` gains `/interrupt <agent-id> [reason]`, next to
-`registerCommand("agents", ...)` at line 4423. The first token names the
-agent and the rest of the line is the reason. It reports the same
-result as the tool.
+`registerCommand("agents", ...)`. The first token names the agent and
+the rest of the line is the reason. It reports the same result as the
+tool.
 
 ## Known Limitations
 
@@ -244,11 +245,11 @@ result as the tool.
 - **A rebuilt session would lose it.** If a future change builds a session
   outside `runAgent`, the shadow is gone and `interrupt_subagent` reports
   `No commands were running for "<agent>".` while a command is live. No
-  such path exists today. `createAgentSession` has two call sites:
-  `src/agent-runner.ts:1319`, which builds the shadow, and
-  `src/mention-clone.ts:156`. The clone allowlists its own tool
-  (`tools: [cloneAgentTool.name]`), so its session holds no `bash` and no
-  interruptible command.
+  such path runs a command today. `createAgentSession` has two call
+  sites: `runAgent` in `src/agent-runner.ts`, which builds the shadow,
+  and the mention clone in `src/mention-clone.ts`. The clone allowlists
+  its own tool (`tools: [cloneAgentTool.name]`), so its session holds no
+  `bash` and no interruptible command.
 - **A reasonless interrupt is not distinguishable from a real abort.**
   The child keeps pi's `Command aborted` text, as the human partner chose.
   A caller that must tell the two apart has to pass a `reason`.
@@ -259,10 +260,11 @@ result as the tool.
   overflow is the leading theory, not a confirmed one. Two verified
   facts narrow it. The viewer footer renders `x stop` only while
   `isStoppable()`, which is `status === "running" || status ===
-  "queued"` (`src/ui/conversation-viewer.ts:642-644`). A live command
-  shows activity `running command` (`src/ui/agent-widget.ts:29`), so the
-  agent was running and the stop action should have been pushed. The
-  remaining suspect is the overflow computation.
+  "queued"` in `src/ui/conversation-viewer.ts`. A live command shows
+  activity `running command` (`TOOL_DISPLAY` in
+  `src/ui/agent-widget.ts`), so the agent was running and the stop
+  action should have been pushed. The remaining suspect is the overflow
+  computation.
 - Verify that a `ToolDefinition` passed through `customTools` keeps
   `promptSnippet` and `promptGuidelines`, or copy them as
   `createBashTool` does.
