@@ -13,7 +13,11 @@
 //      the caller signal stops the command.
 //   2. The interrupt reason is only appended when one was given. A reasonless
 //      interrupt leaves pi's own error path ("Command aborted") untouched,
-//      because the wrapper rethrows the base error unchanged.
+//      because the wrapper rethrows the base error unchanged. A reasoned
+//      interrupt cannot use that path: attaching a reason changes the message,
+//      and pi only re-attaches the accumulated output for the bare `aborted`
+//      sentinel. The wrapper therefore keeps its own bounded tail of the
+//      command's output and sends it with the reason.
 
 import {
 	type BashOperations,
@@ -28,9 +32,42 @@ function appendStatus(text: string, status: string): string {
 	return text ? `${text}\n\n${status}` : status;
 }
 
-/** The rejection message of a base operations failure, for the reason append. */
-function rejectionText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
+/**
+ * The most output bytes the wrapper keeps to report after an interrupt. A
+ * killed command's tail is what matters, so the buffer keeps the last
+ * `INTERRUPT_OUTPUT_LIMIT_BYTES` bytes and drops earlier output. The bound
+ * stops a command that spews gigabytes from exhausting memory.
+ */
+const INTERRUPT_OUTPUT_LIMIT_BYTES = 64 * 1024;
+
+/**
+ * Keep the tail of one command's streamed output, up to
+ * `INTERRUPT_OUTPUT_LIMIT_BYTES` bytes. A reasoned interrupt needs the text the
+ * command already produced: pi attaches its accumulated output only for the
+ * bare `aborted` sentinel, so the wrapper must carry the text itself.
+ */
+class TailBuffer {
+	private readonly chunks: Buffer[] = [];
+	private bytes = 0;
+
+	append(chunk: Buffer): void {
+		this.chunks.push(chunk);
+		this.bytes += chunk.length;
+		while (this.bytes > INTERRUPT_OUTPUT_LIMIT_BYTES && this.chunks.length > 1) {
+			const dropped = this.chunks.shift();
+			if (dropped) this.bytes -= dropped.length;
+		}
+		const only = this.chunks[0];
+		if (this.bytes > INTERRUPT_OUTPUT_LIMIT_BYTES && only) {
+			const tail = only.subarray(only.length - INTERRUPT_OUTPUT_LIMIT_BYTES);
+			this.chunks[0] = tail;
+			this.bytes = tail.length;
+		}
+	}
+
+	text(): string {
+		return Buffer.concat(this.chunks, this.bytes).toString("utf8");
+	}
 }
 
 export interface InterruptibleBashOptions {
@@ -52,24 +89,32 @@ export interface InterruptibleBashOptions {
 }
 
 /**
- * Build a `bash` tool that behaves exactly like pi's own bash tool, except that
- * an interrupt on the registry handle stops the running command and appends the
- * interrupt reason to the failure message.
+ * Build the wrapped operations the interruptible bash tool runs on. The
+ * wrapper is exported so a test can assert its own rejection, which pi's
+ * `execute` otherwise masks. Production code reaches it through
+ * `createInterruptibleBashTool`.
  */
-export function createInterruptibleBashTool(options: InterruptibleBashOptions): ToolDefinition {
+export function createInterruptibleBashOperations(options: InterruptibleBashOptions): BashOperations {
 	const base = options.baseOperations ?? createLocalBashOperations({ shellPath: options.shellPath });
 
-	const wrapped: BashOperations = {
+	return {
 		exec: async (command, cwd, execOptions) => {
 			const handle = options.registry.begin(options.agentId);
 			const signal = execOptions.signal
 				? AbortSignal.any([execOptions.signal, handle.signal])
 				: handle.signal;
+			const output = new TailBuffer();
+			// pi's own output handling must see the original chunk, so forward the
+			// chunk untouched and keep a separate bounded copy for the reason.
+			const onData = (chunk: Buffer) => {
+				if (Buffer.isBuffer(chunk)) output.append(chunk);
+				execOptions.onData(chunk);
+			};
 			try {
-				return await base.exec(command, cwd, { ...execOptions, signal });
+				return await base.exec(command, cwd, { ...execOptions, signal, onData });
 			} catch (error) {
 				if (handle.reason !== undefined) {
-					throw new Error(appendStatus(rejectionText(error), handle.reason));
+					throw new Error(appendStatus(output.text(), handle.reason));
 				}
 				throw error;
 			} finally {
@@ -77,9 +122,17 @@ export function createInterruptibleBashTool(options: InterruptibleBashOptions): 
 			}
 		},
 	};
+}
 
+/**
+ * Build a `bash` tool that behaves like pi's own bash tool, except that an
+ * interrupt on the registry handle stops the running command and appends the
+ * interrupt reason to the failure message, together with the bounded tail of
+ * the output the command already produced.
+ */
+export function createInterruptibleBashTool(options: InterruptibleBashOptions): ToolDefinition {
 	const tool = createBashToolDefinition(options.cwd, {
-		operations: wrapped,
+		operations: createInterruptibleBashOperations(options),
 		commandPrefix: options.commandPrefix,
 		shellPath: options.shellPath,
 	});

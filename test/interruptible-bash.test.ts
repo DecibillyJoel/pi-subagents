@@ -18,7 +18,11 @@
 
 import { describe, expect, it } from "vitest";
 import { CommandInterruptRegistry } from "../src/command-interrupt.js";
-import { createInterruptibleBashTool, type InterruptibleBashOptions } from "../src/interruptible-bash.js";
+import {
+  createInterruptibleBashOperations,
+  createInterruptibleBashTool,
+  type InterruptibleBashOptions,
+} from "../src/interruptible-bash.js";
 
 /** One recorded call to the base operations. */
 interface ExecCall {
@@ -59,6 +63,34 @@ function fakeOperations(calls: ExecCall[], rejection: () => Error = () => new Er
   };
 }
 
+/**
+ * A fake that streams real output first, then hangs until its signal aborts
+ * and rejects with the bare `aborted` sentinel pi's local backend produces. It
+ * stands in for the real backend, which never puts output text in the
+ * rejection, so it proves the wrapper carries the buffered output itself.
+ */
+function streamingOperations(calls: ExecCall[], chunks: string[]) {
+  return {
+    exec: (
+      command: string,
+      cwd: string,
+      options: ExecCall["options"],
+    ): Promise<{ exitCode: number | null }> => {
+      calls.push({ command, cwd, options });
+      for (const chunk of chunks) options.onData(Buffer.from(chunk, "utf8"));
+      return new Promise((_resolve, reject) => {
+        const signal = options.signal;
+        if (!signal) return;
+        if (signal.aborted) {
+          reject(new Error("aborted"));
+          return;
+        }
+        signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    },
+  };
+}
+
 function options(calls: ExecCall[], overrides: Partial<InterruptibleBashOptions> = {}) {
   return {
     cwd: "/repo",
@@ -94,20 +126,70 @@ describe("createInterruptibleBashTool", () => {
     expect(calls[0].options.signal?.aborted).toBe(true);
   });
 
-  it("appends the reason to the base error message and keeps the base text", async () => {
+  it("builds the reason message from buffered output, not the base rejection text", async () => {
     const calls: ExecCall[] = [];
     const registry = new CommandInterruptRegistry();
+    // The base rejects with its own text but streams nothing. pi's real backend
+    // rejects with the bare `aborted` sentinel, so the wrapper must not read
+    // the rejection text: the buffered output is the only source of truth.
     const tool = createInterruptibleBashTool(
       options(calls, {
         registry,
-        baseOperations: fakeOperations(calls, () => new Error("partial output\n\nmore output")),
+        baseOperations: fakeOperations(calls, () => new Error("stale base text")),
       }),
     );
     const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
 
     registry.interrupt("agent-a", "Command interrupted by user");
 
-    await expect(running).rejects.toThrow("partial output\n\nmore output\n\nCommand interrupted by user");
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    expect(error?.message).toBe("Command interrupted by user");
+    expect(error?.message).not.toContain("stale base text");
+  });
+
+  it("keeps the buffered output with the reason on the real aborted-sentinel path", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const tool = createInterruptibleBashTool(
+      options(calls, {
+        registry,
+        baseOperations: streamingOperations(calls, ["line one\nline two"]),
+      }),
+    );
+    const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
+
+    registry.interrupt("agent-a", "stopped by user");
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    // The fake rejects with the bare `aborted` sentinel and no output text, so
+    // the buffered chunks can only reach the message through the wrapper. pi
+    // rethrows a reasoned message verbatim because the sentinel is gone.
+    expect(error?.message).toContain("line one\nline two");
+    expect(error?.message.endsWith("stopped by user")).toBe(true);
+    expect(error?.message).toBe("line one\nline two\n\nstopped by user");
+  });
+
+  it("rethrows the base aborted error unchanged at the operations level", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const ops = createInterruptibleBashOperations(options(calls, { registry }));
+    const running = ops.exec("sleep 10", "/repo", { onData: () => {} });
+
+    registry.interrupt("agent-a");
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    // The raw wrapper rejection must stay the exact sentinel pi checks, not
+    // pi's transform of it, so a reasonless interrupt keeps pi's own path.
+    expect(error?.message).toBe("aborted");
   });
 
   it("leaves pi's own aborted text untouched when the interrupt carries no reason", async () => {
