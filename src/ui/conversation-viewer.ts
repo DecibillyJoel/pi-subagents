@@ -8,6 +8,7 @@
 import { type AgentSession, getMarkdownTheme, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, Input, Markdown, type MarkdownOptions, type MarkdownTheme, matchesKey, type OverlayOptions, ScrollView, type ScrollViewScrollbar, stripTerminalSequences, type TUI, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { renderAgentName } from "../agent-color.js";
+import { BASH_TOOL_NAME } from "../agent-types.js";
 import { extractText } from "../context.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
@@ -603,8 +604,15 @@ export class ConversationViewer implements Component, Focusable {
       footerActions.push({ label: "Enter send", key: "\r" }, { label: "Esc cancel", key: "\x1b" });
       const composeHint = th.fg("dim", "Enter send · Esc cancel");
       const composeLeft = th.fg("accent", "✎ steer");
-      const composeGap = Math.max(1, innerW - visibleWidth(composeLeft) - visibleWidth(composeHint));
-      lines.push(row(composeLeft + " ".repeat(composeGap) + composeHint));
+      // Same shape as the action footer below: the label stays whole and the
+      // hint fits exactly or is dropped. A hint kept past the row width made
+      // `row()` clip it, which removed the `Esc cancel` mouse target.
+      const composeRoom = innerW - visibleWidth(composeLeft) - 1;
+      const composeRight = composeRoom >= visibleWidth(composeHint) ? composeHint : "";
+      const composeGap = composeRight
+        ? Math.max(1, innerW - visibleWidth(composeLeft) - visibleWidth(composeRight))
+        : Math.max(0, innerW - visibleWidth(composeLeft));
+      lines.push(row(composeLeft + " ".repeat(composeGap) + composeRight));
     } else {
       // Actions on the left, navigation on the right, and an action label is
       // NEVER clipped. A truncated label is both invisible and unclickable, so
@@ -707,7 +715,7 @@ export class ConversationViewer implements Component, Focusable {
   private canInterrupt(): boolean {
     if (!this.onInterrupt || !this.activity) return false;
     for (const tool of this.activity.activeTools.values()) {
-      if (tool === "bash") return true;
+      if (tool === BASH_TOOL_NAME) return true;
     }
     return false;
   }

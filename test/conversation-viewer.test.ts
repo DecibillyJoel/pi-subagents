@@ -967,6 +967,31 @@ describe("ConversationViewer", () => {
         assertAllLinesFit(viewer.render(w), w);
       }
     });
+
+    it("keeps the composer label whole and drops the hint below the fit", () => {
+      // Below innerW 30 (terminal width 34) the old gap always kept one space
+      // plus the hint's width, so row() truncated the composed line and clipped
+      // "Esc cancel" — and footerTargets lost the mouse target with it. The
+      // hint must fit exactly or be dropped, the same rule the action footer
+      // uses.
+      for (const w of [34, 26]) {
+        const tui = mockTui(30, w);
+        const viewer = new ConversationViewer(
+          tui, mockSession(), mockRecord({ status: "running" }),
+          undefined, ansiTheme(), vi.fn(), undefined, undefined, vi.fn(),
+        );
+        viewer.handleInput("\r"); // open composer
+        const lines = viewer.render(w);
+        // The composer row sits above the bottom border.
+        const footer = lines[lines.length - 2].replace(/\x1b\[[0-9;]*m/g, "");
+        const inner = footer.replace(/^│ /, "").replace(/ │$/, "");
+
+        expect(inner).toContain("✎ steer");
+        expect(inner).not.toMatch(/\.\.\.|…/);
+        expect(visibleWidth(inner)).toBeLessThanOrEqual(w - 4);
+        assertAllLinesFit(lines, w);
+      }
+    });
   });
 });
 
@@ -1065,7 +1090,7 @@ describe("interrupt key", () => {
     for (const label of ["Enter steer", "i interrupt", "x stop", "m md", "Esc close"]) {
       expect(inner).toContain(label);
     }
-    expect(inner).not.toContain("…");
+    expect(inner).not.toMatch(/\.\.\.|…/);
     expect(visibleWidth(inner)).toBeLessThanOrEqual(53);
     assertAllLinesFit(lines, 57);
   });
