@@ -24,6 +24,7 @@ import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAge
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
+import { describeInterrupt } from "./command-interrupt.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -3249,14 +3250,7 @@ Terse command-style prompts produce shallow, generic work.
       return { ok: false, message: "Agent is owned by another agent or workflow" };
     }
     const count = manager.interruptCommand(record.id, reason);
-    if (count === 0) return { ok: true, message: `No commands were running for "${record.description}".` };
-    return {
-      ok: true,
-      message:
-        count === 1
-          ? `Interrupted 1 running command for "${record.description}".`
-          : `Interrupted ${count} running commands for "${record.description}".`,
-    };
+    return { ok: true, message: describeInterrupt(record.description, count) };
   }
 
   // Deliberately NOT wrapped in `registerToolReportingUsage`: this tool answers
@@ -3488,7 +3482,9 @@ Terse command-style prompts produce shallow, generic work.
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
         }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx), getFullscreenScrollbar(),
-        backgroundActionFor(record, message => ctx.ui.notify(message, "info")));
+        backgroundActionFor(record, message => ctx.ui.notify(message, "info")), () => {
+          ctx.ui.notify(describeInterrupt(record.description, manager.interruptCommand(record.id)), "info");
+        });
       },
       {
         overlay: true,

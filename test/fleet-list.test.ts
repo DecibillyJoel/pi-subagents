@@ -69,8 +69,10 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
 function fakeManager(agents: AgentRecord[]): AgentManager {
   return {
     listAgents: () => agents,
-    abort: () => true,
+    abort: vi.fn(() => true),
     steer: vi.fn(() => true),
+    interruptCommand: vi.fn(() => 1),
+    isCommandRunning: vi.fn(() => true),
   } as unknown as AgentManager;
 }
 
@@ -891,5 +893,68 @@ describe("FleetList workflow rows", () => {
     h.setWorkflows([makeWorkflow({ status: "completed", startedAt: completedAt - 12_000, completedAt })]);
 
     expect(h.render().map(plain).join("\n")).toContain("12s");
+  });
+});
+
+describe("FleetList command controls", () => {
+  /** Activate the list and put the cursor on the only agent row. */
+  function onAgent(agents: AgentRecord[]) {
+    const h = harness(agents);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // → the agent row
+    return h;
+  }
+
+  it("x arms on the first press and stops on the second", () => {
+    const h = onAgent([makeRecord()]);
+
+    h.press("x");
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.render().some(l => l.includes("x again to STOP"))).toBe(true);
+
+    h.press("x");
+    expect(h.manager.abort).toHaveBeenCalledTimes(1);
+    expect(h.manager.abort).toHaveBeenCalledWith("a1");
+    expect(h.notices()).toEqual(['info: Stopped "Sleep then report 1".']);
+  });
+
+  it("i interrupts the selected agent's command and reports the count", () => {
+    const h = onAgent([makeRecord()]);
+    vi.mocked(h.manager.interruptCommand).mockReturnValue(1);
+
+    h.press("i");
+
+    expect(h.manager.interruptCommand).toHaveBeenCalledTimes(1);
+    expect(h.manager.interruptCommand).toHaveBeenCalledWith("a1");
+    // Interrupting is not stopping: the agent keeps running.
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.notices()).toEqual(['info: Interrupted 1 running command for "Sleep then report 1".']);
+  });
+
+  it("pluralizes the count when an agent had several commands", () => {
+    const h = onAgent([makeRecord()]);
+    vi.mocked(h.manager.interruptCommand).mockReturnValue(3);
+
+    h.press("i");
+
+    expect(h.notices()).toEqual(['info: Interrupted 3 running commands for "Sleep then report 1".']);
+  });
+
+  it("i with nothing running says so instead of throwing", () => {
+    // Lingering after it finished, so the row is still there to press on.
+    const h = onAgent([makeRecord({ status: "completed", completedAt: Date.now() - 1_000 })]);
+    vi.mocked(h.manager.isCommandRunning).mockReturnValue(false);
+
+    expect(() => h.press("i")).not.toThrow();
+    expect(h.manager.interruptCommand).not.toHaveBeenCalled();
+    expect(h.notices()).toEqual(['info: No commands were running for "Sleep then report 1".']);
+  });
+
+  it("names both keys in the active hint", () => {
+    const h = onAgent([makeRecord()]);
+    const bar = h.render().join("\n");
+
+    expect(bar).toContain("x stop");
+    expect(bar).toContain("i interrupt");
   });
 });

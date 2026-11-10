@@ -269,6 +269,11 @@ export class ConversationViewer implements Component, Focusable {
      * affordance (history views).
      */
     private onBackground?: ViewerBackgroundAction,
+    /**
+     * Kill the commands the agent is running now, without ending the agent.
+     * Omitted → no `i` affordance. Read live, like `onBackground`.
+     */
+    private onInterrupt?: () => void,
   ) {
     this.fullscreen = tui.mode === "fullscreen";
     this.markdownTheme = resolveMarkdownTheme(theme);
@@ -335,6 +340,18 @@ export class ConversationViewer implements Component, Focusable {
         } else {
           this.stopArmed = true;
         }
+        this.tui.requestRender();
+      }
+      return;
+    }
+
+    // Interrupt the commands the agent is running now (a wedged `bash` call),
+    // leaving the agent alive to react. Single press: it destroys only the
+    // command, so a stray key costs the run's command, not the run.
+    if (matchesKey(data, "i")) {
+      if (this.canInterrupt()) {
+        this.stopArmed = false;
+        this.onInterrupt?.();
         this.tui.requestRender();
       }
       return;
@@ -589,13 +606,16 @@ export class ConversationViewer implements Component, Focusable {
       const composeGap = Math.max(1, innerW - visibleWidth(composeLeft) - visibleWidth(composeHint));
       lines.push(row(composeLeft + " ".repeat(composeGap) + composeHint));
     } else {
-      // Actions on the left, navigation on the right. The scroll hint keeps its
-      // full key list so the less-obvious bindings stay discoverable; it leads
-      // the right group so "Esc close" is the only part that truncates first.
+      // Actions on the left, navigation on the right, and an action label is
+      // NEVER clipped. A truncated label is both invisible and unclickable, so
+      // a key documented only in a clipped spot reads as missing entirely.
+      // Whole labels fit first and the nav hint yields the space.
       const sep = th.fg("dim", " · ");
+      const sepWidth = visibleWidth(sep);
       if (this.canSteer()) footerActions.push({ label: "Enter steer", key: "\r" });
       // Abbreviated for the same reason as the Markdown group below.
       if (this.canSendToBackground()) footerActions.push({ label: "b bg", key: "b" });
+      if (this.canInterrupt()) footerActions.push({ label: "i interrupt", key: "i" });
       if (this.isStoppable()) {
         footerActions.push({ label: this.stopArmed ? "x again to STOP" : "x stop", key: "x" });
       }
@@ -603,20 +623,49 @@ export class ConversationViewer implements Component, Focusable {
       // at 80 columns with steer + stop present, and this group has no
       // degradation step below "drop the line-count readout".
       footerActions.push({ label: `m ${MARKDOWN_MODE_LABELS[this.markdownMode()]}`, key: "m" });
-      const actions = footerActions.map(a => th.fg(a.key === "x" && this.stopArmed ? "error" : "dim", a.label));
+      // A real action, not only a word in the hint: the hint truncates first,
+      // so a key documented only there can disappear with the space.
       footerActions.push({ label: "Esc close", key: "\x1b" });
-      const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
 
-      // Prepend the line-count/scroll-% readout only when there's spare width —
-      // it's the first thing dropped so it never crowds out the hints.
+      // Keep the longest run of whole labels that fits. Dropping the tail is
+      // safe; clipping one is not. `footerActions` is rebuilt to match, so the
+      // mouse targets loop never points at a label that is not on screen.
+      const kept: { label: string; key: string }[] = [];
+      let leftWidth = 0;
+      for (const action of footerActions) {
+        const width = visibleWidth(action.label);
+        const next = kept.length === 0 ? width : leftWidth + sepWidth + width;
+        if (next > innerW) break;
+        kept.push(action);
+        leftWidth = next;
+      }
+      footerActions.splice(0, footerActions.length, ...kept);
+      const actions = kept.map(a => th.fg(a.key === "x" && this.stopArmed ? "error" : "dim", a.label));
+
+      // Prepend the line-count/scroll-% readout only when it fits alongside the
+      // full hint — it is dropped before the hint loses a character.
+      const hint = "↑↓ scroll · PgUp/PgDn or Shift+↑↓";
+      const hintWidth = visibleWidth(hint);
       const scrollPct = contentLines.length <= viewportHeight
         ? "100%"
         : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
       const count = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-      const withCount = [count, ...actions].join(sep);
-      const footerLeft = visibleWidth(withCount) + visibleWidth(footerRight) + 1 <= innerW
-        ? withCount
-        : actions.join(sep);
+      const countWidth = visibleWidth(count);
+      const useCount = leftWidth + sepWidth + countWidth + 1 + hintWidth <= innerW;
+      if (useCount) {
+        leftWidth += sepWidth + countWidth;
+        actions.unshift(count);
+      }
+      const footerLeft = actions.join(sep);
+
+      // The hint is the only part that gives way: whole, then shortened, then
+      // gone. Below a few cells the remainder names no key, so drop it.
+      const room = innerW - leftWidth - 1;
+      const footerRight = room >= hintWidth
+        ? th.fg("dim", hint)
+        : room >= 8
+          ? th.fg("dim", truncateToWidth(hint, room, "…", true))
+          : "";
 
       const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
       lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
@@ -641,6 +690,19 @@ export class ConversationViewer implements Component, Focusable {
   /** Stoppable only when a stop handler exists and the agent is still active. */
   private isStoppable(): boolean {
     return !!this.onStop && (this.record.status === "running" || this.record.status === "queued");
+  }
+
+  /**
+   * Interruptible only while a command is live. The activity object is the
+   * live view the viewer already gets, so no extra predicate is injected.
+   * `bash` is the only tool whose call can be interrupted.
+   */
+  private canInterrupt(): boolean {
+    if (!this.onInterrupt || !this.activity) return false;
+    for (const tool of this.activity.activeTools.values()) {
+      if (tool === "bash") return true;
+    }
+    return false;
   }
 
   /** The mode in force: an `m` press, else the setting, else the default. */
