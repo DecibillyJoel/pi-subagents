@@ -22,6 +22,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { worktreeLost } from "./agent-record-entry.js";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
+import { CommandInterruptRegistry } from "./command-interrupt.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, Pool, SubagentType, ThinkingLevel } from "./types.js";
@@ -430,6 +431,12 @@ export class AgentManager {
   private runningBackground = 0;
   /** Number of currently running foreground (blocking) agents. */
   private runningForeground = 0;
+  /**
+   * One registry for every agent this manager owns. It keys by agent id, so a
+   * single instance is enough, and the child session's interruptible bash tool
+   * writes its live command handles here for `interruptCommand` to reach.
+   */
+  private readonly commandInterrupt = new CommandInterruptRegistry();
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -845,6 +852,7 @@ export class AgentManager {
       worktreeBase: worktreeCwd ? baseCwd : undefined,
       configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
+      commandInterrupt: this.commandInterrupt,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -1578,6 +1586,21 @@ export class AgentManager {
     return true;
   }
 
+  /**
+   * Stop every live command of one agent and report how many stopped. This is
+   * NOT `abort(id)`: the agent keeps running, its record is untouched, and a
+   * known agent with nothing live returns 0. An unknown id is also 0, never an
+   * error — a key press can land after its record is gone.
+   */
+  interruptCommand(id: string, reason?: string): number {
+    return this.commandInterrupt.interrupt(id, reason);
+  }
+
+  /** True while at least one command inside this agent is running. */
+  isCommandRunning(id: string): boolean {
+    return this.commandInterrupt.isRunning(id);
+  }
+
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
     this.tombstone(record);
@@ -1586,6 +1609,9 @@ export class AgentManager {
     // nothing can observe a session that is half torn down.
     record.session = undefined;
     this.agents.delete(id);
+    // Handles are keyed by agent id and have nothing to outlive: drop them with
+    // the record so a later agent that reuses the id cannot inherit stale ones.
+    this.commandInterrupt.clear(id);
     // A failed startup keeps its (rejected) entry so a late awaitStartup still
     // sees it; drop it with the record so the map can't grow unbounded.
     this.startups.delete(id);
