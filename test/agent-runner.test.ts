@@ -52,65 +52,75 @@ const {
   localBashOperationsExec: vi.fn(async () => ({ exitCode: 0, output: "" })),
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
-  createAgentSession,
-  // The runner forwards these to the child loader's `extensionFactories`. Stubbed
-  // to the shape pi returns: a factory that registers nothing.
-  createMcpExtension: () => () => {},
-  createCodemodeExtension: () => () => {},
-  createToolSearchExtension: () => () => {},
-  // Identity, as pi's own is: `defineTool` exists for the type inference, and
-  // the structured-output tool is built through it.
-  defineTool: (definition: unknown) => definition,
-  // The interruptible bash shadow is built from these two. Without the stubs the
-  // transitive import from `interruptible-bash.js` resolves them as undefined.
-  createBashToolDefinition: (_cwd: string, options: any) => {
-    bashDefinitionOptionsRef.current = options;
-    return {
-      name: "bash",
-      label: "bash",
-      description: "bash",
-      parameters: {},
-      execute: vi.fn(),
-    };
-  },
-  createLocalBashOperations: () => ({ exec: localBashOperationsExec }),
-  // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
-  // (an unknown path becomes an error row, mirroring a failed load) and then
-  // runs extensionsOverride over the result.
-  DefaultResourceLoader: class {
-    opts: any;
-    constructor(options: any) {
-      this.opts = options;
-      defaultResourceLoaderCtor(options);
-    }
-
-    async reload() {
-      // Mirror the real loader: `noExtensions: true` zeros out the discovered set
-      // entirely. Otherwise tests pre-register the extensions a path should
-      // resolve to; an unregistered path simply yields no extension (a failed load).
-      if (this.opts.noExtensions) {
-        loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
-        return;
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  // The interruptible bash shadow bounds its thrown message with pi's own
+  // truncation helpers, so take those from the real module instead of
+  // restating their values here.
+  const actual = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return {
+    DEFAULT_MAX_BYTES: actual.DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_LINES: actual.DEFAULT_MAX_LINES,
+    formatSize: actual.formatSize,
+    truncateTail: actual.truncateTail,
+    createAgentSession,
+    // The runner forwards these to the child loader's `extensionFactories`. Stubbed
+    // to the shape pi returns: a factory that registers nothing.
+    createMcpExtension: () => () => {},
+    createCodemodeExtension: () => () => {},
+    createToolSearchExtension: () => () => {},
+    // Identity, as pi's own is: `defineTool` exists for the type inference, and
+    // the structured-output tool is built through it.
+    defineTool: (definition: unknown) => definition,
+    // The interruptible bash shadow is built from these two. Without the stubs the
+    // transitive import from `interruptible-bash.js` resolves them as undefined.
+    createBashToolDefinition: (_cwd: string, options: any) => {
+      bashDefinitionOptionsRef.current = options;
+      return {
+        name: "bash",
+        label: "bash",
+        description: "bash",
+        parameters: {},
+        execute: vi.fn(),
+      };
+    },
+    createLocalBashOperations: () => ({ exec: localBashOperationsExec }),
+    // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
+    // (an unknown path becomes an error row, mirroring a failed load) and then
+    // runs extensionsOverride over the result.
+    DefaultResourceLoader: class {
+      opts: any;
+      constructor(options: any) {
+        this.opts = options;
+        defaultResourceLoaderCtor(options);
       }
-      if (this.opts.extensionsOverride) {
-        loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
-      }
-    }
 
-    getExtensions() {
-      return loaderExtensionsRef.current;
-    }
-  },
-  getAgentDir,
-  SessionManager: {
-    inMemory: sessionManagerInMemory,
-    create: sessionManagerCreate,
-    open: sessionManagerOpen,
-    forkFrom: sessionManagerForkFrom,
-  },
-  SettingsManager: { create: settingsManagerCreate },
-}));
+      async reload() {
+        // Mirror the real loader: `noExtensions: true` zeros out the discovered set
+        // entirely. Otherwise tests pre-register the extensions a path should
+        // resolve to; an unregistered path simply yields no extension (a failed load).
+        if (this.opts.noExtensions) {
+          loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
+          return;
+        }
+        if (this.opts.extensionsOverride) {
+          loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
+        }
+      }
+
+      getExtensions() {
+        return loaderExtensionsRef.current;
+      }
+    },
+    getAgentDir,
+    SessionManager: {
+      inMemory: sessionManagerInMemory,
+      create: sessionManagerCreate,
+      open: sessionManagerOpen,
+      forkFrom: sessionManagerForkFrom,
+    },
+    SettingsManager: { create: settingsManagerCreate },
+  };
+});
 
 vi.mock("../src/agent-types.js", () => ({
   BUILTIN_TOOL_NAMES: ["read", "bash", "edit", "write", "grep", "find", "ls"],

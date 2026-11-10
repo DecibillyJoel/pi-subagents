@@ -16,11 +16,13 @@
 //      factory call must not look like a live command, and the handle must be
 //      released on every settle path, including the throw path.
 
+import { DEFAULT_MAX_BYTES } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { CommandInterruptRegistry } from "../src/command-interrupt.js";
 import {
   createInterruptibleBashOperations,
   createInterruptibleBashTool,
+  INTERRUPT_OUTPUT_LIMIT_BYTES,
   type InterruptibleBashOptions,
   TailBuffer,
 } from "../src/interruptible-bash.js";
@@ -107,7 +109,7 @@ function fill(length: number, byte: string): Buffer {
   return Buffer.alloc(length, byte);
 }
 
-const LIMIT = 64 * 1024;
+const LIMIT = INTERRUPT_OUTPUT_LIMIT_BYTES;
 
 describe("TailBuffer", () => {
   it("keeps no text before any append", () => {
@@ -154,10 +156,10 @@ describe("TailBuffer", () => {
     expect(text.startsWith("a")).toBe(true);
   });
 
-  it("keeps the last limit bytes for the exact [65536, 4] case", () => {
+  it("keeps the last limit bytes for the exact limit-plus-four case", () => {
     const buffer = new TailBuffer();
 
-    buffer.append(fill(65536, "a"));
+    buffer.append(fill(LIMIT, "a"));
     buffer.append(fill(4, "z"));
 
     const text = buffer.text();
@@ -178,14 +180,14 @@ describe("TailBuffer", () => {
 
   it("keeps exactly the limit after many small chunks", () => {
     const buffer = new TailBuffer();
-    // 2000 chunks of 64 bytes is 128000 bytes, twice the limit.
+    // 2000 chunks of 64 bytes is 128000 bytes, well past the limit.
     for (let i = 0; i < 2000; i++) buffer.append(fill(64, i < 1500 ? "a" : "z"));
 
     const text = buffer.text();
     expect(text.length).toBe(LIMIT);
-    // The last 500 chunks are all "z" (32000 bytes), so the retained tail is
-    // 33536 bytes of "a" (524 whole chunks) followed by 32000 bytes of "z".
-    expect(text).toBe(`${"a".repeat(33536)}${"z".repeat(32000)}`);
+    // The last 500 chunks are all "z" (32000 bytes), so the retained tail is the
+    // rest of the limit in whole "a" chunks followed by those 32000 bytes.
+    expect(text).toBe(`${"a".repeat(LIMIT - 32_000)}${"z".repeat(32_000)}`);
   });
 });
 
@@ -261,6 +263,36 @@ describe("createInterruptibleBashTool", () => {
     expect(error?.message).toContain("line one\nline two");
     expect(error?.message.endsWith("stopped by user")).toBe(true);
     expect(error?.message).toBe("line one\nline two\n\nstopped by user");
+  });
+
+  it("bounds a huge tail under pi's output cap and marks it with the truncation footer", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const reason = "stopped by user";
+    // pi copies a thrown message into the tool result with no truncation, so a
+    // reasoned interrupt must bound its own message to pi's own output cap.
+    const tool = createInterruptibleBashTool(
+      options(calls, {
+        registry,
+        baseOperations: streamingOperations(calls, ["x".repeat(200_000)]),
+      }),
+    );
+    const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
+
+    registry.interrupt("agent-a", reason);
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    const message = error?.message ?? "";
+    expect(Buffer.byteLength(message, "utf-8")).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+    expect(message).toContain("[Showing last ");
+    // The buffer keeps at most pi's cap of the stream, so the reported line is
+    // the buffered line, not the 200000 bytes the command wrote.
+    expect(message).toContain("of line 1 (line is 50.0KB)]");
+    expect(message).not.toContain("Full output:");
+    expect(message.endsWith(reason)).toBe(true);
   });
 
   it("rethrows the base aborted error unchanged at the operations level", async () => {

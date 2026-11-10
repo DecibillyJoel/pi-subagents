@@ -23,7 +23,12 @@ import {
 	type BashOperations,
 	createBashToolDefinition,
 	createLocalBashOperations,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
 	type ToolDefinition,
+	type TruncationResult,
+	truncateTail,
 } from "@earendil-works/pi-coding-agent";
 import type { CommandInterruptRegistry } from "./command-interrupt.js";
 
@@ -33,12 +38,61 @@ function appendStatus(text: string, status: string): string {
 }
 
 /**
+ * Bytes held back from the tail for the reason line, the two blank separators,
+ * and the truncation footer. pi's cap must cover the whole thrown message, not
+ * just the command output inside it.
+ */
+const MESSAGE_RESERVE_BYTES = 256;
+
+/** The smallest tail the wrapper reports, even when the reason is very long. */
+const MIN_TAIL_BYTES = 1024;
+
+/**
+ * Describe a truncated tail in pi's own bash words. The wrapper has no
+ * full-output snapshot to point at, so it omits the `Full output:` clause and
+ * never invents a path.
+ */
+function truncationFooter(truncation: TruncationResult, lastLineBytes: number): string {
+	const startLine = truncation.totalLines - truncation.outputLines + 1;
+	const endLine = truncation.totalLines;
+	if (truncation.lastLinePartial) {
+		return `[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${formatSize(lastLineBytes)})]`;
+	}
+	if (truncation.truncatedBy === "lines") {
+		return `[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}]`;
+	}
+	return `[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(truncation.maxBytes)} limit)]`;
+}
+
+/**
+ * Build the message a reasoned interrupt throws: the tail of the command's
+ * output, pi's truncation footer when that tail did not fit, then the reason.
+ * pi copies a thrown error message into the tool result with no truncation, so
+ * the whole message stays under `DEFAULT_MAX_BYTES`, the cap pi's own bash tool
+ * applies.
+ */
+function interruptMessage(output: string, reason: string): string {
+	const reserved = Buffer.byteLength(reason, "utf-8") + MESSAGE_RESERVE_BYTES;
+	const maxBytes = Math.max(MIN_TAIL_BYTES, DEFAULT_MAX_BYTES - reserved);
+	const truncation = truncateTail(output, { maxLines: DEFAULT_MAX_LINES, maxBytes });
+	if (!truncation.truncated) return appendStatus(output, reason);
+	const lastLine = output.slice(output.lastIndexOf("\n") + 1);
+	const lastLineBytes = Buffer.byteLength(lastLine, "utf-8");
+	return appendStatus(
+		appendStatus(truncation.content, truncationFooter(truncation, lastLineBytes)),
+		reason,
+	);
+}
+
+/**
  * The most output bytes the wrapper keeps to report after an interrupt. A
  * killed command's tail is what matters, so the buffer keeps the last
  * `INTERRUPT_OUTPUT_LIMIT_BYTES` bytes and drops earlier output. The bound
- * stops a command that spews gigabytes from exhausting memory.
+ * stops a command that spews gigabytes from exhausting memory. It is pi's own
+ * output cap: a reasoned interrupt bypasses pi's truncation, so anything larger
+ * could never reach the transcript.
  */
-const INTERRUPT_OUTPUT_LIMIT_BYTES = 64 * 1024;
+export const INTERRUPT_OUTPUT_LIMIT_BYTES = DEFAULT_MAX_BYTES;
 
 /**
  * Keep the tail of one command's streamed output, up to
@@ -126,7 +180,7 @@ export function createInterruptibleBashOperations(options: InterruptibleBashOpti
 				return await base.exec(command, cwd, { ...execOptions, signal, onData });
 			} catch (error) {
 				if (handle.reason !== undefined) {
-					throw new Error(appendStatus(output.text(), handle.reason));
+					throw new Error(interruptMessage(output.text(), handle.reason));
 				}
 				throw error;
 			} finally {
@@ -148,14 +202,8 @@ export function createInterruptibleBashTool(options: InterruptibleBashOptions): 
 		commandPrefix: options.commandPrefix,
 		shellPath: options.shellPath,
 	});
-	// A definition placed in `AgentSessionConfig.customTools` is used as-is, so
-	// copy the prompt fields the way `createBashTool` does. Without the copy the
-	// child session would see a bash tool with no prompt hint.
 	// The cast is the same one `createStructuredOutputTool` uses: pi types a
 	// definition's parameters as the open `TSchema`, and the concrete bash schema
 	// is not assignable back to it through `renderCall`.
-	return Object.assign(tool, {
-		promptSnippet: tool.promptSnippet,
-		promptGuidelines: tool.promptGuidelines,
-	}) as ToolDefinition;
+	return tool as ToolDefinition;
 }
