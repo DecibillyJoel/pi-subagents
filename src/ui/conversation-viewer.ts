@@ -629,7 +629,8 @@ export class ConversationViewer implements Component, Focusable {
 
       // Keep the longest run of whole labels that fits. Dropping the tail is
       // safe; clipping one is not. `footerActions` is rebuilt to match, so the
-      // mouse targets loop never points at a label that is not on screen.
+      // mouse targets loop never points at a label that is not on screen. A run
+      // that fills `innerW` exactly is kept: it needs no hint and no gap.
       const kept: { label: string; key: string }[] = [];
       let leftWidth = 0;
       for (const action of footerActions) {
@@ -667,7 +668,13 @@ export class ConversationViewer implements Component, Focusable {
           ? th.fg("dim", truncateToWidth(hint, room, "…", true))
           : "";
 
-      const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
+      // The gap never exceeds what is left. With no hint there is no separator
+      // to spend, so a label run that fills `innerW` stays put. Emitting the
+      // space anyway made the row one cell too wide and `row()` clipped the last
+      // label (`Esc close` → `Esc clo…`), which also removed its mouse target.
+      const footerGap = footerRight
+        ? Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight))
+        : Math.max(0, innerW - visibleWidth(footerLeft));
       lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     }
     if (!this.fullscreen) {

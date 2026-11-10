@@ -1047,4 +1047,26 @@ describe("interrupt key", () => {
     viewer.handleInput("x");
     expect(onStop).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps every action label whole at the exact fit, hint dropped", () => {
+    // 57 columns leaves 53 inner cells, which five actions and their four " · "
+    // separators fill exactly. A row that grows one cell past the fit, or adds a
+    // separator for a hint it dropped, is truncated, and "Esc close" loses its
+    // last cell or turns into "Esc clo…".
+    const viewer = new ConversationViewer(
+      mockTui(30, 57), mockSession([]), mockRecord({ status: "running" }), liveCommand(),
+      ansiTheme(), vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, "auto", undefined, vi.fn(),
+    );
+    const lines = viewer.render(57);
+    const footer = footerOf(lines);
+    // The footer row carries a border and a pad cell either side.
+    const inner = footer.replace(/^│ /, "").replace(/ │$/, "");
+
+    for (const label of ["Enter steer", "i interrupt", "x stop", "m md", "Esc close"]) {
+      expect(inner).toContain(label);
+    }
+    expect(inner).not.toContain("…");
+    expect(visibleWidth(inner)).toBeLessThanOrEqual(53);
+    assertAllLinesFit(lines, 57);
+  });
 });
