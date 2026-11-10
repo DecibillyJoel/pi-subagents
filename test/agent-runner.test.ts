@@ -14,6 +14,8 @@ const {
   sessionManagerForkFrom,
   settingsManagerCreate,
   settingsManagerGetSessionDir,
+  bashDefinitionOptionsRef,
+  localBashOperationsExec,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
   defaultResourceLoaderCtor: vi.fn(),
@@ -36,55 +38,89 @@ const {
   })),
   sessionManagerForkFrom: vi.fn(() => ({ kind: "forked-session-manager" })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
-  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
+  settingsManagerCreate: vi.fn(() => ({
+    kind: "settings-manager",
+    getSessionDir: settingsManagerGetSessionDir,
+    // The interruptible bash shadow reads these, as pi's real manager offers.
+    getShellCommandPrefix: vi.fn(() => undefined as string | undefined),
+    getShellPath: vi.fn(() => undefined as string | undefined),
+  })),
+  // `interruptible-bash.ts` builds the shadow on pi's own bash definition and
+  // local shell operations. Tests keep the definition's options so they can
+  // drive a command through it.
+  bashDefinitionOptionsRef: { current: undefined as any },
+  localBashOperationsExec: vi.fn(async () => ({ exitCode: 0, output: "" })),
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
-  createAgentSession,
-  // The runner forwards these to the child loader's `extensionFactories`. Stubbed
-  // to the shape pi returns: a factory that registers nothing.
-  createMcpExtension: () => () => {},
-  createCodemodeExtension: () => () => {},
-  createToolSearchExtension: () => () => {},
-  // Identity, as pi's own is: `defineTool` exists for the type inference, and
-  // the structured-output tool is built through it.
-  defineTool: (definition: unknown) => definition,
-  // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
-  // (an unknown path becomes an error row, mirroring a failed load) and then
-  // runs extensionsOverride over the result.
-  DefaultResourceLoader: class {
-    opts: any;
-    constructor(options: any) {
-      this.opts = options;
-      defaultResourceLoaderCtor(options);
-    }
-
-    async reload() {
-      // Mirror the real loader: `noExtensions: true` zeros out the discovered set
-      // entirely. Otherwise tests pre-register the extensions a path should
-      // resolve to; an unregistered path simply yields no extension (a failed load).
-      if (this.opts.noExtensions) {
-        loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
-        return;
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  // The interruptible bash shadow bounds its thrown message with pi's own
+  // truncation helpers, so take those from the real module instead of
+  // restating their values here.
+  const actual = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return {
+    DEFAULT_MAX_BYTES: actual.DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_LINES: actual.DEFAULT_MAX_LINES,
+    formatSize: actual.formatSize,
+    truncateTail: actual.truncateTail,
+    createAgentSession,
+    // The runner forwards these to the child loader's `extensionFactories`. Stubbed
+    // to the shape pi returns: a factory that registers nothing.
+    createMcpExtension: () => () => {},
+    createCodemodeExtension: () => () => {},
+    createToolSearchExtension: () => () => {},
+    // Identity, as pi's own is: `defineTool` exists for the type inference, and
+    // the structured-output tool is built through it.
+    defineTool: (definition: unknown) => definition,
+    // The interruptible bash shadow is built from these two. Without the stubs the
+    // transitive import from `interruptible-bash.js` resolves them as undefined.
+    createBashToolDefinition: (_cwd: string, options: any) => {
+      bashDefinitionOptionsRef.current = options;
+      return {
+        name: "bash",
+        label: "bash",
+        description: "bash",
+        parameters: {},
+        execute: vi.fn(),
+      };
+    },
+    createLocalBashOperations: () => ({ exec: localBashOperationsExec }),
+    // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
+    // (an unknown path becomes an error row, mirroring a failed load) and then
+    // runs extensionsOverride over the result.
+    DefaultResourceLoader: class {
+      opts: any;
+      constructor(options: any) {
+        this.opts = options;
+        defaultResourceLoaderCtor(options);
       }
-      if (this.opts.extensionsOverride) {
-        loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
-      }
-    }
 
-    getExtensions() {
-      return loaderExtensionsRef.current;
-    }
-  },
-  getAgentDir,
-  SessionManager: {
-    inMemory: sessionManagerInMemory,
-    create: sessionManagerCreate,
-    open: sessionManagerOpen,
-    forkFrom: sessionManagerForkFrom,
-  },
-  SettingsManager: { create: settingsManagerCreate },
-}));
+      async reload() {
+        // Mirror the real loader: `noExtensions: true` zeros out the discovered set
+        // entirely. Otherwise tests pre-register the extensions a path should
+        // resolve to; an unregistered path simply yields no extension (a failed load).
+        if (this.opts.noExtensions) {
+          loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
+          return;
+        }
+        if (this.opts.extensionsOverride) {
+          loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
+        }
+      }
+
+      getExtensions() {
+        return loaderExtensionsRef.current;
+      }
+    },
+    getAgentDir,
+    SessionManager: {
+      inMemory: sessionManagerInMemory,
+      create: sessionManagerCreate,
+      open: sessionManagerOpen,
+      forkFrom: sessionManagerForkFrom,
+    },
+    SettingsManager: { create: settingsManagerCreate },
+  };
+});
 
 vi.mock("../src/agent-types.js", () => ({
   BUILTIN_TOOL_NAMES: ["read", "bash", "edit", "write", "grep", "find", "ls"],
@@ -157,6 +193,7 @@ import {
   setGraceTurns,
   setRememberAgents,
 } from "../src/agent-runner.js";
+import { CommandInterruptRegistry } from "../src/command-interrupt.js";
 import { compileJsonSchema } from "../src/workflow/json-schema.js";
 
 /** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
@@ -1199,7 +1236,13 @@ describe("agent-runner master tool allowlist", () => {
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
     withExtensions({
-      "/ext/evil.ts": ["Agent", "get_subagent_result", "steer_subagent", "ok_ext"],
+      "/ext/evil.ts": [
+        "Agent",
+        "get_subagent_result",
+        "steer_subagent",
+        "interrupt_subagent",
+        "ok_ext",
+      ],
     });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
@@ -1210,6 +1253,7 @@ describe("agent-runner master tool allowlist", () => {
     expect(tools).not.toContain("Agent");
     expect(tools).not.toContain("get_subagent_result");
     expect(tools).not.toContain("steer_subagent");
+    expect(tools).not.toContain("interrupt_subagent");
     expect(tools).toContain("ok_ext");
   });
 
@@ -1694,6 +1738,100 @@ describe("agent-runner master tool allowlist", () => {
 });
 
 // ─── asynchronously-registered extension tools (issue #125) ──────────────
+// ─── interruptible bash shadow ───────────────────────────────────────────────
+// A subagent's `bash` calls must register with the run's interrupt registry so
+// the parent can stop a running command. The runner therefore swaps pi's own
+// `bash` for the interruptible shadow, but only when the agent's tool scope
+// still allows `bash` and a registry was supplied for this run.
+describe("agent-runner interruptible bash shadow", () => {
+  it("hands the child session an interruptible bash tool bound to the run's agent id", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const registry = new CommandInterruptRegistry();
+    let baseSignal: AbortSignal | undefined;
+    // A command that keeps running until it is interrupted.
+    localBashOperationsExec.mockImplementationOnce(((_c: string, _w: string, options: any) => {
+      baseSignal = options.signal;
+      return new Promise(() => {});
+    }) as any);
+
+    await runAgent(ctx, "Explore", "go", { pi, agentId: "agent-1", commandInterrupt: registry });
+
+    expect(customToolNames()).toContain("bash");
+    // The shadow belongs to this run: its commands register under this agent id,
+    // so an interrupt from the parent reaches the command it started.
+    bashDefinitionOptionsRef.current.operations.exec("sleep 60", "/tmp", {
+      onData: () => {},
+      signal: undefined,
+    });
+    expect(registry.isRunning("agent-1")).toBe(true);
+    expect(registry.interrupt("agent-1", "stopped by parent")).toBe(1);
+    expect(baseSignal?.aborted).toBe(true);
+  });
+
+  it("does not shadow bash when the static allowlist omits it", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false, builtinToolNames: ["read"] }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false, builtinToolNames: ["read"] }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read"]);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "agent-1",
+      commandInterrupt: new CommandInterruptRegistry(),
+    });
+
+    expect(customToolNames()).not.toContain("bash");
+  });
+
+  it("does not shadow bash when the deny set excludes it", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true, disallowedTools: ["bash"] }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "agent-1",
+      commandInterrupt: new CommandInterruptRegistry(),
+    });
+
+    expect(customToolNames()).not.toContain("bash");
+  });
+
+  it("does not shadow bash when the run has no interrupt registry", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, agentId: "agent-1" });
+
+    expect(customToolNames()).not.toContain("bash");
+  });
+
+  it("keeps the interrupt tool out of a plain subagent's scope", async () => {
+    expect(SUBAGENT_TOOL_NAMES.INTERRUPT).toBe("interrupt_subagent");
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    withExtensions({ "/ext/subagent-tools.js": ["interrupt_subagent", "get_subagent_result"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].excludeTools).toContain("interrupt_subagent");
+    expect(lastToolsPassed()).not.toContain("interrupt_subagent");
+  });
+});
+
 // pi-mcp calls registerTool from `session_start`, context-mode from
 // `before_agent_start` — both long after loader.reload(). `registerTool` writes
 // into the live `extension.tools` map, which is what these tests simulate.

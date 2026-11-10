@@ -36,6 +36,7 @@ describe("cross-extension RPC", () => {
       getRecord: vi.fn().mockReturnValue({}),
       consumeResult: vi.fn().mockReturnValue(true),
       steer: vi.fn().mockReturnValue(true),
+      interruptCommand: vi.fn().mockReturnValue(0),
     };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
@@ -297,6 +298,112 @@ describe("cross-extension RPC", () => {
 
       await new Promise((r) => setTimeout(r, 20));
       expect(reply).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- interrupt ---
+
+  describe("interrupt RPC", () => {
+    // Same ownership stance as stop: only the session's own agents are this
+    // RPC's to touch. The count is the answer, not a boolean — pi runs tool
+    // calls in parallel, so one agent can have several live commands.
+    it("reports how many live commands it aborted", async () => {
+      (manager.interruptCommand as ReturnType<typeof vi.fn>).mockReturnValue(1);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:interrupt:reply:req-i1", reply);
+      events.emit("subagents:rpc:interrupt", { requestId: "req-i1", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { interrupted: 1 } });
+      expect(manager.interruptCommand).toHaveBeenCalledWith("agent-42", undefined);
+    });
+
+    it("passes the reason through to the manager", async () => {
+      (manager.interruptCommand as ReturnType<typeof vi.fn>).mockReturnValue(2);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:interrupt:reply:req-i2", reply);
+      events.emit("subagents:rpc:interrupt", {
+        requestId: "req-i2", agentId: "agent-42", reason: "superseded by 839ab295",
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { interrupted: 2 } });
+      expect(manager.interruptCommand).toHaveBeenCalledWith("agent-42", "superseded by 839ab295");
+    });
+
+    // Unlike stop, nothing running is an answer rather than a failure: the
+    // command may simply have finished between the caller's decision and the
+    // request, and that is not an error for the caller to handle.
+    it("succeeds with zero when no command is live", async () => {
+      (manager.interruptCommand as ReturnType<typeof vi.fn>).mockReturnValue(0);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:interrupt:reply:req-i3", reply);
+      events.emit("subagents:rpc:interrupt", { requestId: "req-i3", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { interrupted: 0 } });
+    });
+
+    it("returns error when the agent is unknown to the manager", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:interrupt:reply:req-i4", reply);
+      events.emit("subagents:rpc:interrupt", { requestId: "req-i4", agentId: "nonexistent" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found" });
+      expect(manager.interruptCommand).not.toHaveBeenCalled();
+    });
+
+    it("refuses to interrupt another agent's nested child or a workflow's agent", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue({ parentAgentId: "agent-1" });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:interrupt:reply:req-i5", reply);
+      events.emit("subagents:rpc:interrupt", { requestId: "req-i5", agentId: "agent-child" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error: "Agent is owned by another agent or workflow",
+      });
+      expect(manager.interruptCommand).not.toHaveBeenCalled();
+    });
+
+    // A client waiting on stop must not be woken by an interrupt reply that
+    // carries the same requestId, and the other way round. The reply channel
+    // carries the method name, so the two can never alias.
+    it("keeps its reply off the stop reply channel", async () => {
+      registerRpcHandlers(deps);
+      const stopReply = vi.fn();
+      const interruptReply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-x1", stopReply);
+      events.on("subagents:rpc:interrupt:reply:req-x1", interruptReply);
+
+      events.emit("subagents:rpc:interrupt", { requestId: "req-x1", agentId: "agent-42" });
+      await vi.waitFor(() => expect(interruptReply).toHaveBeenCalled());
+      expect(stopReply).not.toHaveBeenCalled();
+
+      events.emit("subagents:rpc:stop", { requestId: "req-x1", agentId: "agent-42" });
+      await vi.waitFor(() => expect(stopReply).toHaveBeenCalled());
+      expect(interruptReply).toHaveBeenCalledTimes(1);
+    });
+
+    it("unsub stops responding to interrupt requests", async () => {
+      const { unsubInterrupt } = registerRpcHandlers(deps);
+      unsubInterrupt();
+
+      const reply = vi.fn();
+      events.on("subagents:rpc:interrupt:reply:req-i6", reply);
+      events.emit("subagents:rpc:interrupt", { requestId: "req-i6", agentId: "agent-42" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
+      expect(manager.interruptCommand).not.toHaveBeenCalled();
     });
   });
 

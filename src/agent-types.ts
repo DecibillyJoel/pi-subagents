@@ -21,6 +21,12 @@ export const BUILTIN_TOOL_NAMES: string[] = [
   ...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map((t) => t.name)),
 ];
 
+/**
+ * The builtin shell tool's name. The interruptible bash tool shadows it, so the
+ * UI compares a live tool name against this one constant.
+ */
+export const BASH_TOOL_NAME = "bash";
+
 /** Unified runtime registry of all agents (defaults + user-defined). */
 const agents = new Map<string, AgentConfig>();
 

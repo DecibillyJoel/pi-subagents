@@ -967,5 +967,131 @@ describe("ConversationViewer", () => {
         assertAllLinesFit(viewer.render(w), w);
       }
     });
+
+    it("keeps the composer label whole and drops the hint below the fit", () => {
+      // Below innerW 30 (terminal width 34) the old gap always kept one space
+      // plus the hint's width, so row() truncated the composed line and clipped
+      // "Esc cancel" — and footerTargets lost the mouse target with it. The
+      // hint must fit exactly or be dropped, the same rule the action footer
+      // uses.
+      for (const w of [34, 26]) {
+        const tui = mockTui(30, w);
+        const viewer = new ConversationViewer(
+          tui, mockSession(), mockRecord({ status: "running" }),
+          undefined, ansiTheme(), vi.fn(), undefined, undefined, vi.fn(),
+        );
+        viewer.handleInput("\r"); // open composer
+        const lines = viewer.render(w);
+        // The composer row sits above the bottom border.
+        const footer = lines[lines.length - 2].replace(/\x1b\[[0-9;]*m/g, "");
+        const inner = footer.replace(/^│ /, "").replace(/ │$/, "");
+
+        expect(inner).toContain("✎ steer");
+        expect(inner).not.toMatch(/\.\.\.|…/);
+        expect(visibleWidth(inner)).toBeLessThanOrEqual(w - 4);
+        assertAllLinesFit(lines, w);
+      }
+    });
+  });
+});
+
+describe("interrupt key", () => {
+  const W = 80;
+  const stripAnsi = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+  /** The activity the extension keeps while a bash call is live. */
+  const liveCommand = () => ({
+    activeTools: new Map([["call-1", "bash"]]),
+    toolUses: 1,
+    responseText: "",
+    turnCount: 1,
+  }) as any;
+
+  /** The idle footer row: second to last, above the bottom border. */
+  const footerOf = (lines: string[]) => stripAnsi(lines[lines.length - 2]);
+
+  it("offers i and interrupts while a command is live", () => {
+    const onInterrupt = vi.fn();
+    const viewer = new ConversationViewer(
+      mockTui(30, W), mockSession([]), mockRecord({ status: "running" }), liveCommand(),
+      ansiTheme(), vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, "auto", undefined, onInterrupt,
+    );
+
+    expect(footerOf(viewer.render(W))).toContain("i interrupt");
+
+    viewer.handleInput("i");
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("has no i affordance and ignores i when no command is live", () => {
+    const onInterrupt = vi.fn();
+    const viewer = new ConversationViewer(
+      mockTui(30, W), mockSession([]), mockRecord({ status: "running" }), undefined,
+      ansiTheme(), vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, "auto", undefined, onInterrupt,
+    );
+
+    expect(viewer.render(W).join("\n")).not.toContain("i interrupt");
+    expect(() => viewer.handleInput("i")).not.toThrow();
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
+  it("counts only a bash command as interruptible", () => {
+    const onInterrupt = vi.fn();
+    const activity = { ...liveCommand(), activeTools: new Map([["call-1", "read"]]) };
+    const viewer = new ConversationViewer(
+      mockTui(30, W), mockSession([]), mockRecord({ status: "running" }), activity,
+      ansiTheme(), vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, "auto", undefined, onInterrupt,
+    );
+
+    expect(viewer.render(W).join("\n")).not.toContain("i interrupt");
+    viewer.handleInput("i");
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
+  it("keeps every action label whole where the nav hint cannot also fit", () => {
+    // 70 columns leaves 66 inner cells. Every action plus " · " separators takes
+    // 53, so the 34-cell nav hint cannot also fit. The old composition laid the
+    // hint out at full width and then truncated the row from the right, which cut
+    // "Esc close" down to "E…" — invisible and, because footerTargets is built
+    // from whole labels, unclickable. That is the reported bug.
+    const onStop = vi.fn();
+    const viewer = new ConversationViewer(
+      mockTui(30, 70), mockSession([]), mockRecord({ status: "running" }), liveCommand(),
+      ansiTheme(), vi.fn(), onStop, undefined, vi.fn(), false, undefined, undefined, "auto", undefined, vi.fn(),
+    );
+    const lines = viewer.render(70);
+    const footer = footerOf(lines);
+
+    for (const label of ["Enter steer", "i interrupt", "x stop", "m md", "Esc close"]) {
+      expect(footer).toContain(label);
+    }
+    assertAllLinesFit(lines, 70);
+
+    // Stop still works at this width.
+    viewer.handleInput("x");
+    viewer.handleInput("x");
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps every action label whole at the exact fit, hint dropped", () => {
+    // 57 columns leaves 53 inner cells, which five actions and their four " · "
+    // separators fill exactly. A row that grows one cell past the fit, or adds a
+    // separator for a hint it dropped, is truncated, and "Esc close" loses its
+    // last cell or turns into "Esc clo…".
+    const viewer = new ConversationViewer(
+      mockTui(30, 57), mockSession([]), mockRecord({ status: "running" }), liveCommand(),
+      ansiTheme(), vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, "auto", undefined, vi.fn(),
+    );
+    const lines = viewer.render(57);
+    const footer = footerOf(lines);
+    // The footer row carries a border and a pad cell either side.
+    const inner = footer.replace(/^│ /, "").replace(/ │$/, "");
+
+    for (const label of ["Enter steer", "i interrupt", "x stop", "m md", "Esc close"]) {
+      expect(inner).toContain(label);
+    }
+    expect(inner).not.toMatch(/\.\.\.|…/);
+    expect(visibleWidth(inner)).toBeLessThanOrEqual(53);
+    assertAllLinesFit(lines, 57);
   });
 });

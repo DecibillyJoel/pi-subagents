@@ -24,6 +24,7 @@ import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAge
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
+import { describeInterrupt } from "./command-interrupt.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -86,6 +87,11 @@ import { escapeXml } from "./xml.js";
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
+}
+
+/** Tool execute return value for a refused command: same shape, marked failed. */
+function errorResult(msg: string, details?: AgentDetails) {
+  return { ...textResult(msg, details), isError: true };
 }
 
 export function renderRunningAgentStatus(
@@ -921,6 +927,7 @@ export default function (pi: ExtensionAPI) {
             return true;
           },
           steer: (id, message) => manager.steer(id, message),
+          interruptCommand: (id, reason) => manager.interruptCommand(id, reason),
         },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
@@ -1190,6 +1197,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle?.unsubSteer();
+    rpcHandle?.unsubInterrupt();
     rpcHandle = undefined;
     currentCtx = undefined;
     setConfirmationCtx(undefined);
@@ -3227,6 +3235,60 @@ Terse command-style prompts produce shallow, generic work.
     },
   }));
 
+  // ---- interrupt_subagent tool ----
+
+  /**
+   * Stop an agent's live commands and report the count. Shared by the tool and
+   * `/interrupt` so the two surfaces cannot drift in wording or ownership rule.
+   *
+   * The ownership check matches the RPC `stop` handler: a nested child reports
+   * through its owner, so a top-level caller must not reach into it. Nothing
+   * here touches the record — the agent keeps running.
+   */
+  function interruptAgentCommands(
+    ref: string,
+    reason: string | undefined,
+  ): { ok: true; message: string } | { ok: false; message: string } {
+    const record = resolveAgentRef(ref);
+    if (!record) return { ok: false, message: "Agent not found" };
+    if (!isTopLevelAgent(record)) {
+      return { ok: false, message: "Agent is owned by another agent or workflow" };
+    }
+    const count = manager.interruptCommand(record.id, reason);
+    return { ok: true, message: describeInterrupt(record.description, count) };
+  }
+
+  // Deliberately NOT wrapped in `registerToolReportingUsage`: this tool answers
+  // from local state and spends no tokens. The wrapper drains the parent's
+  // pending-spend counter into whatever it returns, so wrapping a zero-cost tool
+  // would bill a previous run's cost to this result.
+  pi.registerTool(defineTool({
+    name: SUBAGENT_TOOL_NAMES.INTERRUPT,
+    label: "Interrupt Command",
+    description:
+      "Stop the command currently running inside a background agent, without stopping the agent itself. " +
+      "Use this when one command is wedged — a hung build, a stalled test run — and the agent should " +
+      "carry on with the rest of its work. The agent keeps running; only its live commands are aborted. " +
+      "Reports how many commands were stopped.",
+    promptSnippet: "Stop a wedged command inside a background agent without stopping the agent",
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "The agent whose running commands to stop. The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+      }),
+      reason: Type.Optional(
+        Type.String({
+          description: "Why the command is being stopped. The wrapper that awaited the command reads this.",
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      const outcome = interruptAgentCommands(params.agent_id, params.reason);
+      // A refusal is a failure. Only the zero-command answer stays a normal
+      // result, because the command did run and simply had nothing live.
+      return outcome.ok ? textResult(outcome.message) : errorResult(outcome.message);
+    },
+  }));
+
   // ---- /agents interactive menu ----
 
   // Directory resolution and the frontmatter edits live in agent-file-toggle.ts
@@ -3427,7 +3489,9 @@ Terse command-style prompts produce shallow, generic work.
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
         }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx), getFullscreenScrollbar(),
-        backgroundActionFor(record, message => ctx.ui.notify(message, "info")));
+        backgroundActionFor(record, message => ctx.ui.notify(message, "info")), () => {
+          ctx.ui.notify(describeInterrupt(record.description, manager.interruptCommand(record.id)), "info");
+        });
       },
       {
         overlay: true,
@@ -4423,6 +4487,24 @@ Write the file using the write tool. Only write the file, nothing else.`;
   pi.registerCommand("agents", {
     description: "Manage agents",
     handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
+  });
+
+  pi.registerCommand("interrupt", {
+    description: "Stop the commands running inside one agent, without stopping the agent",
+    handler: async (args, ctx) => {
+      // First token is the agent, the rest of the line is the reason: a reason
+      // is free text, so it cannot be another positional parameter.
+      const trimmed = args.trim();
+      const split = trimmed.search(/\s/);
+      const ref = split === -1 ? trimmed : trimmed.slice(0, split);
+      if (!ref) {
+        ctx.ui.notify("Usage: /interrupt <agent-id|@handle> [reason]", "warning");
+        return;
+      }
+      const reason = split === -1 ? undefined : trimmed.slice(split + 1).trim();
+      const outcome = interruptAgentCommands(ref, reason || undefined);
+      ctx.ui.notify(outcome.message, outcome.ok ? undefined : "error");
+    },
   });
 
   /**

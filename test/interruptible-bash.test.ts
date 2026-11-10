@@ -1,0 +1,391 @@
+// The interruptible bash tool is the seam that lets a user stop ONE running
+// command inside a subagent while pi's own bash tool does everything else. The
+// interesting behaviour is not the happy path — it is what happens when the
+// registry's handle aborts, so a fake BashOperations stands in for the real
+// shell. The fake records the exec options and stays pending until its signal
+// aborts, which pins three separate invariants:
+//
+//   1. The wrapper passes BOTH signals down. An interrupt aborts the command
+//      through the registry handle, and pi's own run signal still reaches the
+//      base operations. Dropping either one silently breaks a different
+//      cancellation path.
+//   2. The reason is only appended when the registry was interrupted with one.
+//      A reasonless interrupt must leave pi's error text ("Command aborted")
+//      reachable, so the wrapper rethrows the base error unchanged.
+//   3. The registry tracks the command only for the duration of `exec`. A
+//      factory call must not look like a live command, and the handle must be
+//      released on every settle path, including the throw path.
+
+import { DEFAULT_MAX_BYTES } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it } from "vitest";
+import { CommandInterruptRegistry } from "../src/command-interrupt.js";
+import {
+  createInterruptibleBashOperations,
+  createInterruptibleBashTool,
+  INTERRUPT_OUTPUT_LIMIT_BYTES,
+  type InterruptibleBashOptions,
+  TailBuffer,
+} from "../src/interruptible-bash.js";
+
+/** One recorded call to the base operations. */
+interface ExecCall {
+  command: string;
+  cwd: string;
+  options: {
+    onData: (data: Buffer) => void;
+    signal?: AbortSignal;
+    timeout?: number;
+    env?: NodeJS.ProcessEnv;
+  };
+}
+
+/**
+ * A BashOperations that never resolves until its signal aborts. It rejects the
+ * way pi's local backend does: `new Error("aborted")`, which is the message
+ * pi's own bash tool checks for. `rejection` lets a case set the base text so
+ * the test can prove that text survives the reason append.
+ */
+function fakeOperations(calls: ExecCall[], rejection: () => Error = () => new Error("aborted")) {
+  return {
+    exec: (
+      command: string,
+      cwd: string,
+      options: ExecCall["options"],
+    ): Promise<{ exitCode: number | null }> => {
+      calls.push({ command, cwd, options });
+      return new Promise((_resolve, reject) => {
+        const signal = options.signal;
+        if (!signal) return;
+        if (signal.aborted) {
+          reject(rejection());
+          return;
+        }
+        signal.addEventListener("abort", () => reject(rejection()));
+      });
+    },
+  };
+}
+
+/**
+ * A fake that streams real output first, then hangs until its signal aborts
+ * and rejects with the bare `aborted` sentinel pi's local backend produces. It
+ * stands in for the real backend, which never puts output text in the
+ * rejection, so it proves the wrapper carries the buffered output itself.
+ */
+function streamingOperations(calls: ExecCall[], chunks: string[]) {
+  return {
+    exec: (
+      command: string,
+      cwd: string,
+      options: ExecCall["options"],
+    ): Promise<{ exitCode: number | null }> => {
+      calls.push({ command, cwd, options });
+      for (const chunk of chunks) options.onData(Buffer.from(chunk, "utf8"));
+      return new Promise((_resolve, reject) => {
+        const signal = options.signal;
+        if (!signal) return;
+        if (signal.aborted) {
+          reject(new Error("aborted"));
+          return;
+        }
+        signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    },
+  };
+}
+
+function options(calls: ExecCall[], overrides: Partial<InterruptibleBashOptions> = {}) {
+  return {
+    cwd: "/repo",
+    agentId: "agent-a",
+    registry: new CommandInterruptRegistry(),
+    baseOperations: fakeOperations(calls),
+    ...overrides,
+  };
+}
+
+/** A buffer of `length` copies of one ASCII byte, so byte count equals text length. */
+function fill(length: number, byte: string): Buffer {
+  return Buffer.alloc(length, byte);
+}
+
+const LIMIT = INTERRUPT_OUTPUT_LIMIT_BYTES;
+
+describe("TailBuffer", () => {
+  it("keeps no text before any append", () => {
+    const buffer = new TailBuffer();
+
+    expect(buffer.text()).toBe("");
+  });
+
+  it("keeps the whole chunk when it is smaller than the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(10, "a"));
+
+    expect(buffer.text()).toBe("a".repeat(10));
+  });
+
+  it("keeps the whole chunk when it is exactly the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(LIMIT, "a"));
+
+    expect(buffer.text().length).toBe(LIMIT);
+    expect(buffer.text()).toBe("a".repeat(LIMIT));
+  });
+
+  it("trims a single chunk larger than the limit to exactly the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(100_000, "a"));
+
+    expect(buffer.text().length).toBe(LIMIT);
+    expect(buffer.text()).toBe("a".repeat(LIMIT));
+  });
+
+  it("keeps the last limit bytes when the older chunk is exactly the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(LIMIT, "a"));
+    buffer.append(fill(4, "z"));
+
+    const text = buffer.text();
+    expect(text.length).toBe(LIMIT);
+    expect(text.endsWith("zzzz")).toBe(true);
+    expect(text.startsWith("a")).toBe(true);
+  });
+
+  it("keeps the last limit bytes for the exact limit-plus-four case", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(LIMIT, "a"));
+    buffer.append(fill(4, "z"));
+
+    const text = buffer.text();
+    expect(text.length).toBe(LIMIT);
+    expect(text).toBe(`${"a".repeat(LIMIT - 4)}zzzz`);
+  });
+
+  it("keeps the last limit bytes when one chunk is far larger than the limit", () => {
+    const buffer = new TailBuffer();
+
+    buffer.append(fill(100_000, "a"));
+    buffer.append(fill(4, "z"));
+
+    const text = buffer.text();
+    expect(text.length).toBe(LIMIT);
+    expect(text).toBe(`${"a".repeat(LIMIT - 4)}zzzz`);
+  });
+
+  it("keeps exactly the limit after many small chunks", () => {
+    const buffer = new TailBuffer();
+    // 2000 chunks of 64 bytes is 128000 bytes, well past the limit.
+    for (let i = 0; i < 2000; i++) buffer.append(fill(64, i < 1500 ? "a" : "z"));
+
+    const text = buffer.text();
+    expect(text.length).toBe(LIMIT);
+    // The last 500 chunks are all "z" (32000 bytes), so the retained tail is the
+    // rest of the limit in whole "a" chunks followed by those 32000 bytes.
+    expect(text).toBe(`${"a".repeat(LIMIT - 32_000)}${"z".repeat(32_000)}`);
+  });
+});
+
+describe("createInterruptibleBashTool", () => {
+  it("returns a definition named bash", () => {
+    const calls: ExecCall[] = [];
+
+    const tool = createInterruptibleBashTool(options(calls));
+
+    expect(tool.name).toBe("bash");
+  });
+
+  it("aborts the running exec when the registry interrupts the agent", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const tool = createInterruptibleBashTool(options(calls, { registry }));
+    const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].options.signal?.aborted).toBe(false);
+    expect(registry.isRunning("agent-a")).toBe(true);
+
+    registry.interrupt("agent-a", "stopped by user");
+
+    await expect(running).rejects.toThrow("stopped by user");
+    expect(calls[0].options.signal?.aborted).toBe(true);
+  });
+
+  it("builds the reason message from buffered output, not the base rejection text", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    // The base rejects with its own text but streams nothing. pi's real backend
+    // rejects with the bare `aborted` sentinel, so the wrapper must not read
+    // the rejection text: the buffered output is the only source of truth.
+    const tool = createInterruptibleBashTool(
+      options(calls, {
+        registry,
+        baseOperations: fakeOperations(calls, () => new Error("stale base text")),
+      }),
+    );
+    const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
+
+    registry.interrupt("agent-a", "Command interrupted by user");
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    expect(error?.message).toBe("Command interrupted by user");
+    expect(error?.message).not.toContain("stale base text");
+  });
+
+  it("keeps the buffered output with the reason on the real aborted-sentinel path", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const tool = createInterruptibleBashTool(
+      options(calls, {
+        registry,
+        baseOperations: streamingOperations(calls, ["line one\nline two"]),
+      }),
+    );
+    const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
+
+    registry.interrupt("agent-a", "stopped by user");
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    // The fake rejects with the bare `aborted` sentinel and no output text, so
+    // the buffered chunks can only reach the message through the wrapper. pi
+    // rethrows a reasoned message verbatim because the sentinel is gone.
+    expect(error?.message).toContain("line one\nline two");
+    expect(error?.message.endsWith("stopped by user")).toBe(true);
+    expect(error?.message).toBe("line one\nline two\n\nstopped by user");
+  });
+
+  it("bounds a huge tail under pi's output cap and marks it with the truncation footer", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const reason = "stopped by user";
+    // pi copies a thrown message into the tool result with no truncation, so a
+    // reasoned interrupt must bound its own message to pi's own output cap.
+    const tool = createInterruptibleBashTool(
+      options(calls, {
+        registry,
+        baseOperations: streamingOperations(calls, ["x".repeat(200_000)]),
+      }),
+    );
+    const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
+
+    registry.interrupt("agent-a", reason);
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    const message = error?.message ?? "";
+    expect(Buffer.byteLength(message, "utf-8")).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+    expect(message).toContain("[Showing last ");
+    // The buffer keeps at most pi's cap of the stream, so the reported line is
+    // the buffered line, not the 200000 bytes the command wrote.
+    expect(message).toContain("of line 1 (line is 50.0KB)]");
+    expect(message).not.toContain("Full output:");
+    expect(message.endsWith(reason)).toBe(true);
+  });
+
+  it("rethrows the base aborted error unchanged at the operations level", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const ops = createInterruptibleBashOperations(options(calls, { registry }));
+    const running = ops.exec("sleep 10", "/repo", { onData: () => {} });
+
+    registry.interrupt("agent-a");
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    // The raw wrapper rejection must stay the exact sentinel pi checks, not
+    // pi's transform of it, so a reasonless interrupt keeps pi's own path.
+    expect(error?.message).toBe("aborted");
+  });
+
+  it("leaves pi's own aborted text untouched when the interrupt carries no reason", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const tool = createInterruptibleBashTool(options(calls, { registry }));
+    const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
+
+    registry.interrupt("agent-a");
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    // The wrapper rethrows the base error unchanged, so pi's own bash tool
+    // turns "aborted" into its fixed text with no reason appended.
+    expect(error?.message).toBe("Command aborted");
+  });
+
+  it("passes pi's own run signal through and aborts exec when it fires", async () => {
+    const calls: ExecCall[] = [];
+    const controller = new AbortController();
+    const tool = createInterruptibleBashTool(options(calls));
+    const running = tool.execute("call-1", { command: "sleep 10" }, controller.signal, undefined, undefined);
+
+    expect(calls[0].options.signal).not.toBe(controller.signal);
+    expect(calls[0].options.signal?.aborted).toBe(false);
+
+    controller.abort();
+
+    const error = await running.then(
+      () => undefined,
+      (err: unknown) => err as Error,
+    );
+    expect(error?.message).toBe("Command aborted");
+    expect(calls[0].options.signal?.aborted).toBe(true);
+  });
+
+  it("reports isRunning true only while exec runs", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const tool = createInterruptibleBashTool(options(calls, { registry }));
+
+    expect(registry.isRunning("agent-a")).toBe(false);
+    const running = tool.execute("call-1", { command: "sleep 10" }, undefined, undefined, undefined);
+    expect(registry.isRunning("agent-a")).toBe(true);
+
+    registry.interrupt("agent-a");
+    await expect(running).rejects.toThrow("aborted");
+
+    expect(registry.isRunning("agent-a")).toBe(false);
+  });
+
+  it("keeps promptSnippet and promptGuidelines on the definition", () => {
+    const calls: ExecCall[] = [];
+
+    const tool = createInterruptibleBashTool(options(calls));
+
+    expect(typeof tool.promptSnippet).toBe("string");
+    expect(tool.promptSnippet?.length ?? 0).toBeGreaterThan(0);
+    expect(Array.isArray(tool.promptGuidelines)).toBe(true);
+    expect(tool.promptGuidelines?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("resolves the prefixed command through the base operations", async () => {
+    const calls: ExecCall[] = [];
+    const registry = new CommandInterruptRegistry();
+    const tool = createInterruptibleBashTool(
+      options(calls, { registry, commandPrefix: "source ./env.sh", shellPath: "/bin/bash" }),
+    );
+    const running = tool.execute("call-1", { command: "echo hi" }, undefined, undefined, undefined);
+
+    expect(calls[0].command).toBe("source ./env.sh\necho hi");
+    expect(calls[0].cwd).toBe("/repo");
+
+    registry.interrupt("agent-a");
+    await running.catch(() => {});
+  });
+});

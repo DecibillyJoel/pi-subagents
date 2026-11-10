@@ -69,8 +69,10 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
 function fakeManager(agents: AgentRecord[]): AgentManager {
   return {
     listAgents: () => agents,
-    abort: () => true,
+    abort: vi.fn(() => true),
     steer: vi.fn(() => true),
+    interruptCommand: vi.fn(() => 1),
+    isCommandRunning: vi.fn(() => true),
   } as unknown as AgentManager;
 }
 
@@ -891,5 +893,128 @@ describe("FleetList workflow rows", () => {
     h.setWorkflows([makeWorkflow({ status: "completed", startedAt: completedAt - 12_000, completedAt })]);
 
     expect(h.render().map(plain).join("\n")).toContain("12s");
+  });
+});
+
+describe("FleetList command controls", () => {
+  /** Activate the list and put the cursor on the only agent row. */
+  function onAgent(agents: AgentRecord[]) {
+    const h = harness(agents);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // → the agent row
+    return h;
+  }
+
+  it("x arms on the first press and stops on the second", () => {
+    const h = onAgent([makeRecord()]);
+
+    h.press("x");
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.render().some(l => l.includes("x again to STOP"))).toBe(true);
+
+    h.press("x");
+    expect(h.manager.abort).toHaveBeenCalledTimes(1);
+    expect(h.manager.abort).toHaveBeenCalledWith("a1");
+    expect(h.notices()).toEqual(['info: Stopped "Sleep then report 1".']);
+  });
+
+  it("i interrupts the selected agent's command and reports the count", () => {
+    const h = onAgent([makeRecord()]);
+    vi.mocked(h.manager.interruptCommand).mockReturnValue(1);
+
+    h.press("i");
+
+    expect(h.manager.interruptCommand).toHaveBeenCalledTimes(1);
+    expect(h.manager.interruptCommand).toHaveBeenCalledWith("a1");
+    // Interrupting is not stopping: the agent keeps running.
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.notices()).toEqual(['info: Interrupted 1 running command for "Sleep then report 1".']);
+  });
+
+  it("pluralizes the count when an agent had several commands", () => {
+    const h = onAgent([makeRecord()]);
+    vi.mocked(h.manager.interruptCommand).mockReturnValue(3);
+
+    h.press("i");
+
+    expect(h.notices()).toEqual(['info: Interrupted 3 running commands for "Sleep then report 1".']);
+  });
+
+  it("i with nothing running says so instead of throwing", () => {
+    // Lingering after it finished, so the row is still there to press on.
+    const h = onAgent([makeRecord({ status: "completed", completedAt: Date.now() - 1_000 })]);
+    vi.mocked(h.manager.interruptCommand).mockReturnValue(0);
+
+    expect(() => h.press("i")).not.toThrow();
+    // The key always asks the manager, so the zero-count path stays reachable.
+    expect(h.manager.interruptCommand).toHaveBeenCalledWith("a1");
+    expect(h.notices()).toEqual(['info: No commands were running for "Sleep then report 1".']);
+  });
+
+  it("x twice on a completed record does nothing", () => {
+    // Lingering after it finished, so the row is still there to press on.
+    const h = onAgent([makeRecord({ status: "completed", completedAt: Date.now() - 1_000 })]);
+
+    h.press("x");
+    h.press("x");
+
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.notices()).toEqual([]);
+  });
+
+  it("arms on the record, not the row position", () => {
+    const agents = [
+      makeRecord({ id: "a1", description: "one", startedAt: 1 }),
+      makeRecord({ id: "a2", description: "two", startedAt: 2 }),
+      makeRecord({ id: "a3", description: "three", startedAt: 3 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // → a1
+    h.press(DOWN); // → a2
+
+    h.press("x"); // arm a2
+    expect(h.manager.abort).not.toHaveBeenCalled();
+
+    // a1 drops out of the roster, so the clamp moves the cursor onto a3.
+    agents.splice(0, 1);
+    h.press("x");
+
+    // The row that said "x again to STOP" is gone. a3 is not the armed record.
+    expect(h.manager.abort).not.toHaveBeenCalled();
+
+    h.press("x"); // now a3 is armed, so this stops it
+    expect(h.manager.abort).toHaveBeenCalledTimes(1);
+    expect(h.manager.abort).toHaveBeenCalledWith("a3");
+  });
+
+  it("drops the STOP hint when a roster shift leaves another row selected", () => {
+    const agents = [
+      makeRecord({ id: "a1", description: "one", startedAt: 1 }),
+      makeRecord({ id: "a2", description: "two", startedAt: 2 }),
+      makeRecord({ id: "a3", description: "three", startedAt: 3 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // → a1
+    h.press(DOWN); // → a2
+
+    h.press("x"); // arm a2
+    expect(h.render().some(l => l.includes("x again to STOP"))).toBe(true);
+
+    // a1 drops out, so the clamp moves the cursor onto a3 while a2 stays armed.
+    agents.splice(0, 1);
+
+    expect(h.render().some(l => l.includes("x again to STOP"))).toBe(false);
+    // The plain hint stays, so `x` is still advertised as a first press.
+    expect(h.render().some(l => l.includes("x stop"))).toBe(true);
+  });
+
+  it("names both keys in the active hint", () => {
+    const h = onAgent([makeRecord()]);
+    const bar = h.render().join("\n");
+
+    expect(bar).toContain("x stop");
+    expect(bar).toContain("i interrupt");
   });
 });

@@ -14,6 +14,7 @@
 import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { describeInterrupt } from "../command-interrupt.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
@@ -108,6 +109,13 @@ export class FleetList {
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
+  /**
+   * Set by the first `x` to the armed record's id; the second `x` on that same
+   * record stops it. The id, not a bare flag: the roster is positional and an
+   * agent above the armed row can finish and drop out, which would move another
+   * agent into the armed spot.
+   */
+  private stopArmedId: string | undefined;
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
   private viewingAgentId: string | undefined;
@@ -350,17 +358,49 @@ export class FleetList {
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
+      this.stopArmedId = undefined;
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
       this.selectedIndex -= 1;
+      this.stopArmedId = undefined;
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
     if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
+
+    // Stop or interrupt the selected agent without opening its viewer. Both
+    // keys act on an agent row only: `main` and a workflow run have nothing of
+    // their own to stop. `i` needs no confirmation — it kills the command and
+    // the agent keeps running — while `x` ends the agent, so it is two-press.
+    if (matchesKey(data, "x") || matchesKey(data, "i")) {
+      const entry = this.roster()[this.selectedIndex];
+      if (!entry || entry.kind !== "agent") return { consume: true };
+      const record = entry.record;
+      if (matchesKey(data, "i")) {
+        this.stopArmedId = undefined;
+        // Asked unconditionally: the manager owns the "nothing is running"
+        // answer, and a zero count must reach describeInterrupt so the user is
+        // told so rather than seeing silence.
+        const count = this.manager.interruptCommand(record.id);
+        this.ui?.notify(describeInterrupt(record.description, count), "info");
+        this.update();
+        return { consume: true };
+      }
+      if (record.status === "running" || record.status === "queued") {
+        if (this.stopArmedId === record.id) {
+          this.stopArmedId = undefined;
+          if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
+        } else {
+          this.stopArmedId = record.id;
+        }
+        this.update();
+      }
+      return { consume: true };
+    }
 
     // Any other key cancels navigation and flows to the editor.
     this.deactivate();
@@ -386,6 +426,7 @@ export class FleetList {
   private deactivate(): void {
     this.active = false;
     this.selectedIndex = 0;
+    this.stopArmedId = undefined;
     this.update();
   }
 
@@ -439,6 +480,10 @@ export class FleetList {
           this.onViewerMarkdown,
           this.scrollbarMode(),
           this.backgroundAction?.(record, message => this.ui?.notify(message, "info")),
+          () => {
+            const count = this.manager.interruptCommand(record.id);
+            this.ui?.notify(describeInterrupt(record.description, count), "info");
+          },
         );
       },
       {
@@ -477,10 +522,17 @@ export class FleetList {
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
     const sel = Math.min(this.selectedIndex, rows.length);
+    // Advertise a second press only when `x` would perform one: the armed id
+    // must still belong to the selected row, or a roster shift leaves the hint
+    // promising a stop that another row owns.
+    const selected = sel > 0 ? rows[sel - 1] : undefined;
+    const stopArmed = selected?.kind === "agent" && this.stopArmedId === selected.record.id;
 
-    const hint = this.active
-      ? "↑↓ select · enter view · esc back"
-      : "esc to interrupt · ← for agents · ↓ to manage";
+    const hint = !this.active
+      ? "esc to interrupt · ← for agents · ↓ to manage"
+      : stopArmed
+        ? "↑↓ select · x again to STOP · esc back"
+        : "↑↓ select · enter view · x stop · i interrupt · esc back";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");

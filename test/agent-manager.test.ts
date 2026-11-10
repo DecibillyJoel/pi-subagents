@@ -2784,3 +2784,102 @@ describe("AgentManager — the agent file's `isolation` wins over the spawn opti
     expect(createWorktree).toHaveBeenCalledTimes(1);
   });
 });
+
+// One command inside a subagent must be stoppable without stopping the
+// subagent: the manager owns the registry the child session's bash tool
+// writes to, so the parent can address a command by agent id.
+describe("AgentManager — interrupt one live command", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  /** The registry the manager hands to every run, taken from the last runAgent call. */
+  const registryFrom = () => vi.mocked(runAgent).mock.lastCall![3].commandInterrupt!;
+
+  const spawnHung = () => {
+    vi.mocked(runAgent).mockClear();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    return manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+  };
+
+  it("passes one shared registry instance to runAgent as commandInterrupt", () => {
+    manager = new AgentManager();
+    spawnHung();
+    const first = registryFrom();
+    expect(first).toBeDefined();
+
+    spawnHung();
+    expect(registryFrom()).toBe(first);
+  });
+
+  it("interruptCommand aborts the live command and returns 1 without touching record.status", () => {
+    manager = new AgentManager();
+    const id = spawnHung();
+    const record = manager.getRecord(id)!;
+    const handle = registryFrom().begin(id);
+
+    expect(record.status).toBe("running");
+    expect(manager.isCommandRunning(id)).toBe(true);
+
+    expect(manager.interruptCommand(id, "stop the build")).toBe(1);
+    expect(handle.signal.aborted).toBe(true);
+    expect(handle.reason).toBe("stop the build");
+
+    // Only the command stopped. The agent record is untouched: still running,
+    // no completion stamp, and its own abort controller still live.
+    expect(record.status).toBe("running");
+    expect(record.completedAt).toBeUndefined();
+    expect(record.abortController?.signal.aborted).toBe(false);
+  });
+
+  it("interruptCommand on an unknown id returns 0 and does not throw", () => {
+    manager = new AgentManager();
+    expect(() => manager.interruptCommand("does-not-exist")).not.toThrow();
+    expect(manager.interruptCommand("does-not-exist")).toBe(0);
+    expect(manager.isCommandRunning("does-not-exist")).toBe(false);
+  });
+
+  it("isCommandRunning tracks a live handle for an idle agent", async () => {
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.isCommandRunning(id)).toBe(false);
+    const handle = registryFrom().begin(id);
+    expect(manager.isCommandRunning(id)).toBe(true);
+    handle.done();
+    expect(manager.isCommandRunning(id)).toBe(false);
+  });
+
+  it("removing a record drops its live handles, so a reused id starts clean", async () => {
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    // A handle is still live on a record that is about to be removed.
+    const handle = registryFrom().begin(id);
+    expect(manager.isCommandRunning(id)).toBe(true);
+
+    // clearCompleted() is one of removeRecord's callers (a session boundary).
+    manager.clearCompleted();
+    expect(manager.getRecord(id)).toBeUndefined();
+
+    // Would be 1 if the handle had survived the removal.
+    expect(manager.interruptCommand(id)).toBe(0);
+    expect(manager.isCommandRunning(id)).toBe(false);
+    // clear() drops the handles without aborting anything.
+    expect(handle.signal.aborted).toBe(false);
+  });
+});
