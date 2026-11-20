@@ -24,6 +24,7 @@ import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
 import { ctx, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
+import { setConfirmationCtx } from "../src/model-confirmation.js";
 
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
 
@@ -48,6 +49,7 @@ afterEach(async () => {
   await booted?.get("session_shutdown")?.();
   delete (globalThis as any)[MANAGER_KEY];
   booted = undefined;
+  setConfirmationCtx(undefined);
   hermetic?.restore();
   hermetic = undefined;
   rmSync(sessionDir, { recursive: true, force: true });
@@ -283,6 +285,9 @@ describe("Agent({ resume }) of an evicted agent keeps its own model and thinking
     const { pi, tools, lifecycle } = makePi();
     pi.appendEntry = vi.fn((customType: string, data: unknown) => branch.push({ type: "custom", customType, data }));
     subagentsExtension(pi);
+    // The #462 runs below name a model, so they reach the confirmation gate.
+    // `session_start` never runs here, so register an approving UI directly.
+    setConfirmationCtx({ hasUI: true, ui: { confirm: vi.fn(async () => true) } });
     booted = lifecycle;
     const context = ctx({
       model: parentModel,

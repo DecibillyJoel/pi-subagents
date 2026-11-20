@@ -3339,6 +3339,7 @@ Terse command-style prompts produce shallow, generic work.
       backgroundByDefault: getBackgroundByDefault(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
+      confirmCallerModel: isConfirmCallerModelEnabled(),
       strictAgentFiles,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),

@@ -481,6 +481,7 @@ export const SETTING_DEFAULTS: { readonly [K in keyof Required<SubagentsSettings
   backgroundByDefault: true,
   schedulingEnabled: true,
   scopeModels: false,
+  confirmCallerModel: true,
   strictAgentFiles: false,
   disableDefaultAgents: false,
   toolDescriptionMode: "full",

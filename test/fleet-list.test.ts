@@ -1436,8 +1436,8 @@ describe("FleetList command controls", () => {
     h.press("x"); // arm a2
     expect(h.manager.abort).not.toHaveBeenCalled();
 
-    // a1 drops out of the roster, so the clamp moves the cursor onto a3.
-    agents.splice(0, 1);
+    // The armed record leaves the roster, so the clamp lands the cursor on a3.
+    agents.splice(1, 1);
     h.press("x");
 
     // The row that said "x again to STOP" is gone. a3 is not the armed record.
