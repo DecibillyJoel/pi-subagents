@@ -21,10 +21,10 @@ import { AgentManager } from "../src/agent-manager.js";
 import { agentRecordEntryData, worktreeLost } from "../src/agent-record-entry.js";
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { setConfirmationCtx } from "../src/model-confirmation.js";
 import type { AgentRecord } from "../src/types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
 import { ctx, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
-import { setConfirmationCtx } from "../src/model-confirmation.js";
 
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
 
