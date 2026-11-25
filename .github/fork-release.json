@@ -1,0 +1,14 @@
+{
+  "upstream": "tintinweb/pi-subagents",
+  "tagFormat": "v{version}",
+  "versionFields": [
+    { "path": "package.json", "field": "version" }
+  ],
+  "lockfile": "package-lock.json",
+  "install": "npm ci",
+  "test": "npm run test",
+  "build": "npm run build",
+  "pack": "",
+  "assets": [],
+  "nodeVersion": "22"
+}
